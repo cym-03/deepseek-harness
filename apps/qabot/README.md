@@ -43,6 +43,7 @@ The portal base64url-encodes the UTF-8 JSON identity claims and signs that encod
 | `POST /v1/conversations/:id/messages` | Submit `{ message }` to an owned conversation |
 | `DELETE /v1/conversations/:id` | Archive an owned conversation |
 | `POST /v1/conversations/:id/rating` | Submit `{ ticketId, rating, version }` in the conversation |
+| `GET /v1/events` | Stream identity-filtered conversation and ticket invalidations over SSE |
 | `GET /v1/agent/tickets` | List tickets in the agent's service groups; SystemAdmin sees all |
 | `GET /v1/agent/tickets/:id` | Read an authorized ticket and its public replies |
 | `POST /v1/agent/tickets/:id/accept` | Accept using the signed `employeeId` and `{ version }` |

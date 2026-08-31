@@ -43,6 +43,7 @@ DEEPSEEK_BASE_URL=http://<relay>/v1 pnpm --filter @deepseek-ai/dsh-qabot run dev
 | `POST /v1/conversations/:id/messages` | 在会话中提问 `{ message }` |
 | `DELETE /v1/conversations/:id` | 归档当前员工的会话 |
 | `POST /v1/conversations/:id/rating` | 会话内提交 `{ ticketId, rating, version }` |
+| `GET /v1/events` | 通过 SSE 推送按签名身份过滤的会话与工单变更事件 |
 | `GET /v1/agent/tickets` | 客服所属服务组的工单列表；SystemAdmin 可查看全部 |
 | `GET /v1/agent/tickets/:id` | 有权访问的工单详情和人工回复 |
 | `POST /v1/agent/tickets/:id/accept` | 使用签名身份中的 `employeeId` 接单，提交 `{ version }` |

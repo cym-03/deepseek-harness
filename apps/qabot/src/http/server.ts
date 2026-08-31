@@ -19,6 +19,7 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import { EventEmitter } from 'node:events'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -105,6 +106,33 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
   const idleSweepMs = Number(process.env.QABOT_IDLE_SWEEP_MS ?? 60_000)
   if (!Number.isFinite(idleConversationMs) || idleConversationMs <= 0 || !Number.isFinite(idleSweepMs) || idleSweepMs <= 0) {
     throw new Error('QABOT_IDLE_CONVERSATION_MS 和 QABOT_IDLE_SWEEP_MS 必须为正数')
+  }
+  interface LiveChange {
+    revision: number
+    employeeId: string
+    groups: string[]
+    assignees: string[]
+  }
+  const liveChanges = new EventEmitter()
+  liveChanges.setMaxListeners(1_000)
+  let liveRevision = 0
+  const publishTicketChange = (ticket: Ticket | undefined, previous?: Ticket): void => {
+    if (ticket === undefined) return
+    liveRevision += 1
+    liveChanges.emit('change', {
+      revision: liveRevision,
+      employeeId: ticket.userKey,
+      groups: [...new Set([ticket.department, previous?.department].filter(group => group !== null && group !== undefined))],
+      assignees: [...new Set([ticket.assignee, previous?.assignee].filter(assignee => assignee !== null && assignee !== undefined))],
+    } satisfies LiveChange)
+  }
+  const canReceiveChange = (identity: PortalIdentity, change: LiveChange): boolean => {
+    if (hasRole(identity, ['SystemAdmin'])) return true
+    if (isServiceDeskUser(identity)) {
+      return change.groups.some(group => identity.departmentIds.includes(group))
+        || change.assignees.includes(identity.displayName)
+    }
+    return identity.employeeId === change.employeeId
   }
 
   const readJson = async (req: IncomingMessage): Promise<unknown> => {
@@ -290,6 +318,31 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     return { id: await qabot.newConversation(identity.employeeId) }
   })
 
+  route('GET', '/v1/events', async (ctx) => {
+    const identity = ctx.identity
+    if (identity === undefined) throw new Error('FORBIDDEN')
+    ctx.res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache, no-transform',
+      connection: 'keep-alive',
+      'x-accel-buffering': 'no',
+    })
+    ctx.res.write(`event: ready\ndata: ${JSON.stringify({ revision: liveRevision })}\n\n`)
+    const onChange = (change: LiveChange): void => {
+      if (canReceiveChange(identity, change)) {
+        ctx.res.write(`event: change\ndata: ${JSON.stringify(change)}\n\n`)
+      }
+    }
+    liveChanges.on('change', onChange)
+    const keepAlive = setInterval(() => ctx.res.write(': keep-alive\n\n'), 25_000)
+    keepAlive.unref()
+    ctx.req.on('close', () => {
+      clearInterval(keepAlive)
+      liveChanges.off('change', onChange)
+    })
+    return undefined
+  })
+
   route('GET', '/v1/conversations', async (ctx) => {
     const identity = requireEmployee(ctx)
     return { conversations: await qabot.listConversations(identity.employeeId) }
@@ -314,7 +367,9 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     if (ticket === undefined) throw new Error('TICKET_NOT_FOUND')
     await tickets.closeService(sessionId)
     await tickets.close(ticket.id, null)
-    return { ticket: await tickets.get(ticket.id) }
+    const closed = await tickets.get(ticket.id)
+    publishTicketChange(closed)
+    return { ticket: closed }
   })
 
   route('POST', '/v1/conversations/<sessionId>/handoff', async (ctx) => {
@@ -344,6 +399,7 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
         ticketVersion: current.version,
       })
     }
+    publishTicketChange(current)
     return { ticket: current }
   })
 
@@ -352,7 +408,9 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     const body = ctx.json as { message?: unknown }
     const message = typeof body.message === 'string' ? body.message.trim() : ''
     if (message === '' || message.length > maxMessageLength) throw new Error('MESSAGE_INVALID')
-    return await answerConversation(identity.employeeId, message, ctx.params.sessionId)
+    const outcome = await answerConversation(identity.employeeId, message, ctx.params.sessionId)
+    publishTicketChange(await tickets.forSession(ctx.params.sessionId ?? ''))
+    return outcome
   })
 
   route('POST', '/v1/conversations/<sessionId>/messages/stream', async (ctx) => {
@@ -372,6 +430,7 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     event('started', { sessionId })
     try {
       const outcome = await answerConversation(identity.employeeId, message, sessionId)
+      publishTicketChange(await tickets.forSession(sessionId))
       if (typeof outcome.text === 'string' && outcome.text !== '') event('text-delta', { text: outcome.text })
       if (Array.isArray(outcome.images)) {
         for (const image of outcome.images) event('citation', { modality: 'image', source: image })
@@ -417,7 +476,9 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
       throw new Error('TICKET_NOT_FOUND')
     }
     if (!await tickets.rate(ticketId, rating, version)) throw new Error('TICKET_CONFLICT')
-    return { ticket: await tickets.get(ticketId) }
+    const rated = await tickets.get(ticketId)
+    publishTicketChange(rated)
+    return { ticket: rated }
   })
 
   route('GET', '/v1/agent/tickets', async (ctx) => {
@@ -456,7 +517,9 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
       resourceId: String(id),
       detail: null,
     })
-    return { ticket: await tickets.get(id) }
+    const accepted = await tickets.get(id)
+    publishTicketChange(accepted)
+    return { ticket: accepted }
   })
 
   route('POST', '/v1/agent/tickets/<id>/reply', async (ctx) => {
@@ -476,12 +539,14 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
       resourceId: String(id),
       detail: null,
     })
-    return { ok: true, ticket: await tickets.get(id) }
+    const replied = await tickets.get(id)
+    publishTicketChange(replied)
+    return { ok: true, ticket: replied }
   })
 
   route('POST', '/v1/agent/tickets/<id>/transfer', async (ctx) => {
     const id = Number(ctx.params.id)
-    const { identity } = await requireTicketAccess(ctx, id)
+    const { identity, ticket: previousTicket } = await requireTicketAccess(ctx, id)
     const body = ctx.json as { toGroup?: unknown; assignee?: unknown; note?: unknown; version?: unknown }
     const toGroup = typeof body.toGroup === 'string' ? body.toGroup.trim() : ''
     const assignee = typeof body.assignee === 'string' ? body.assignee.trim() : ''
@@ -497,6 +562,7 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
       await outbox.enqueue(`ticket:${id}:handoff:${ticket.version}`, 'ticket.handoff', { ticketId: id, ticketVersion: ticket.version })
     }
     await audit.append({ actorId: identity.employeeId, action: 'ticket.transfer', resourceType: 'ticket', resourceId: String(id), detail: JSON.stringify({ toGroup, assignee: target.openId }) })
+    publishTicketChange(ticket, previousTicket)
     return { ok: true, ticket }
   })
 
@@ -510,7 +576,9 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     if (version === null) throw new Error('VERSION_REQUIRED')
     if (!await tickets.close(id, satisfaction, version)) throw new Error('TICKET_CONFLICT')
     await audit.append({ actorId: identity.employeeId, action: 'ticket.close', resourceType: 'ticket', resourceId: String(id), detail: null })
-    return { ticket: await tickets.get(id) }
+    const closed = await tickets.get(id)
+    publishTicketChange(closed)
+    return { ticket: closed }
   })
 
   route('GET', '/v1/agent/staff', async (ctx) => {
