@@ -53,7 +53,15 @@ describe('KbStore embedding persistence', () => {
 
     const staged = store.stageChunks('policy', ['新版报销流程'], '员工制度')
     expect(staged.changed).toBe(true)
-    expect(store.list()).toEqual([{ source: 'policy', title: '员工制度', chunks: 1, url: null }])
+    expect(store.list()).toEqual([{
+      source: 'policy',
+      title: '员工制度',
+      chunks: 1,
+      url: null,
+      publicationStatus: 'online',
+      effectiveAt: null,
+      expiresAt: null,
+    }])
     expect(store.pendingVersions()).toHaveLength(1)
     const beforePublication = await store.search('新版报销流程')
 
@@ -63,6 +71,51 @@ describe('KbStore embedding persistence', () => {
     store.dispose()
     expect(beforePublication).toMatch(/^未在知识库中找到/)
     expect(afterPublication).toContain('新版报销流程')
+  })
+
+  it('excludes offline, not-yet-effective, and expired documents from every retrieval path', async () => {
+    delete process.env.EMBED_MODEL
+    const store = new KbStore(tempDb())
+    store.upsertChunks('online-policy', ['在线制度唯一内容'], '在线制度')
+    store.upsertChunks('offline-policy', ['下架制度唯一内容'], '下架制度')
+    store.upsertChunks('future-policy', ['未来制度唯一内容'], '未来制度', undefined, {
+      effectiveAt: Date.now() + 60_000,
+    })
+    store.upsertChunks('expired-policy', ['过期制度唯一内容'], '过期制度', undefined, {
+      expiresAt: Date.now() - 1,
+    })
+    expect(store.setPublication('offline-policy', false)).toBe(true)
+
+    expect(await store.search('在线制度唯一内容')).toContain('在线制度唯一内容')
+    expect(await store.search('下架制度唯一内容')).toMatch(/^未在知识库中找到/)
+    expect(await store.search('未来制度唯一内容')).toMatch(/^未在知识库中找到/)
+    expect(await store.search('过期制度唯一内容')).toMatch(/^未在知识库中找到/)
+    expect(store.list().map(item => [item.source, item.publicationStatus])).toEqual([
+      ['online-policy', 'online'],
+      ['offline-policy', 'offline'],
+      ['future-policy', 'scheduled'],
+      ['expired-policy', 'offline'],
+    ])
+    store.dispose()
+  })
+
+  it('publishes a reviewed version with a validity window and keeps vectors reusable after reactivation', async () => {
+    delete process.env.EMBED_MODEL
+    const store = new KbStore(tempDb())
+    store.upsertChunks('policy', ['旧版制度'], '员工制度')
+    expect(await store.embedMissing()).toBe(1)
+    expect(store.setPublication('policy', false)).toBe(true)
+    expect(await store.search('旧版制度')).toMatch(/^未在知识库中找到/)
+    expect(store.setPublication('policy', true)).toBe(true)
+    expect(await store.embedMissing()).toBe(0)
+
+    const staged = store.stageChunks('policy', ['新版制度'], '员工制度')
+    const effectiveAt = Date.now() + 60_000
+    const expiresAt = effectiveAt + 60_000
+    expect(store.publishVersion(staged.versionId!, 'reviewer-1', { effectiveAt, expiresAt })).toBe(true)
+    expect(store.list()[0]).toMatchObject({ publicationStatus: 'scheduled', effectiveAt, expiresAt })
+    expect(await store.search('新版制度')).toMatch(/^未在知识库中找到/)
+    store.dispose()
   })
 
   it('migrates the single-kind legacy table to a composite key', async () => {
@@ -212,6 +265,12 @@ describe('KbStore embedding persistence', () => {
       title: '报销流程图',
       sourceUrl: 'https://example.feishu.cn/wiki/policy',
     }])
+    expect(await reopened.findVisionMedia('查看报销流程图')).toEqual(media)
+    expect(reopened.setPublication('wiki:policy:vision:image-1', false)).toBe(true)
+    expect(await reopened.search('查看报销流程图')).toMatch(/^未在知识库中找到/)
+    expect(await reopened.findVisionMedia('查看报销流程图')).toEqual([])
+    expect(reopened.setPublication('wiki:policy:vision:image-1', true)).toBe(true)
+    expect(await reopened.embedVisionMissing()).toBe(0)
     expect(await reopened.findVisionMedia('查看报销流程图')).toEqual(media)
     reopened.setConversationMedia('session-1', 12, media)
     expect(reopened.conversationMedia('session-1').get(12)).toEqual(media)

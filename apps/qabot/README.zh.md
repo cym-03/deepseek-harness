@@ -47,6 +47,8 @@ DEEPSEEK_BASE_URL=http://<relay>/v1 pnpm --filter @deepseek-ai/dsh-qabot run dev
 | `GET /v1/agent/tickets/:id` | 有权访问的工单详情和人工回复 |
 | `POST /v1/agent/tickets/:id/accept` | 使用签名身份中的 `employeeId` 接单，提交 `{ version }` |
 | `POST /v1/agent/tickets/:id/reply` | 提交 `{ message, version }`，追加公开回复并进入 `waiting_employee` |
+| `POST /v1/knowledge/versions/:id/publish` | 发布已审核版本，可提交 `{ effectiveAt, expiresAt }` |
+| `POST /v1/knowledge/:source/publication` | 设置 `{ online }`，不删除版本或向量 |
 | `GET /v1/system/audit` | SystemAdmin 查询特权操作审计记录 |
 
 ## HTTP 接口
@@ -68,7 +70,7 @@ DEEPSEEK_BASE_URL=http://<relay>/v1 pnpm --filter @deepseek-ai/dsh-qabot run dev
 
 - 所有环境**强制** `QABOT_API_TOKEN`，缺失时拒绝启动（防止内网机器绕过门户直接调 3100）。
 - 除静态测试页 `/`、`/chat.html` 与 `/api/health` 外，所有 `/api/*` 请求必须携带请求头 `X-Qabot-Token: <令牌>`，否则返回 401。
-- 令牌值：`start-qabot.bat` 内置默认值，根 `.env` 写入同值（`loadEnv` 会读取）。
+- 令牌只由部署环境提供，启动脚本不内置默认值。
 - **门户 smart-qa 薄代理转发时必须在每个请求上带同值的 `X-Qabot-Token`**，否则门户所有请求 401。测试页 `/` 首次打开会弹窗输入令牌（存 localStorage）。
 - 想轮换令牌：改 `start-qabot.bat` 与 `.env` 里的同值，并同步门户侧配置。
 
@@ -185,6 +187,7 @@ schtasks /Delete /TN "qabot-service" /F
 - **中转余额**：`192.168.10.61:3000` 间歇 `Insufficient Balance` → 偶发 STREAM_CLOSED，需充值。
 - **空回复自动重试**：中继异常导致回合空回复时自动重试一次，仍空则返回「模型服务暂时异常，请稍后重试」，不再让用户看到空白（重试的系统提示在会话转录中隐藏）。
 - **向量索引增量持久化**：向量表随 `kb.db` 持久保留，不会每次启动重建。文本和视觉向量分别使用 `text`/`vision` 类型；内容、模型或维度变化时只更新失效记录。飞书图片原始数据保存在 `vision_assets`，因此视觉模型切换后不需要依赖旧下载链接。
+- **知识上下架**：已下架、未到生效时间和已过失效时间的文档不会进入关键词、文本向量、视觉向量或图片返回。重新上线会复用未变化的向量。
 - **视觉检索**：设置 `VISION_EMBED_MODEL=qwen3-vl-embedding` 后，飞书文档图片会下载并生成独立视觉向量。员工文本查询使用同一模型生成查询向量，与文本检索结果合并。需要飞书 `drive:drive:readonly` 下载权限。
 - **飞书权限**：应用需开通 `im:message:send_as_bot`（发消息）等权限，否则发送会降级为仅记日志。
 - 工具注册必须 `defineTool`（裸 register 的 parameters 不转 JSON Schema，中继拒收）。

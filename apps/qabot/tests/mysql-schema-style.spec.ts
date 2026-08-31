@@ -6,7 +6,7 @@ import { verifyMysqlSchemaStyle } from '../src/database/mysql-schema-style.ts'
 
 describe('MySQL schema style', () => {
   it('requires Chinese comments and the shared text collation in every migration', async () => {
-    for (const name of ['001_service_desk.sql', '002_knowledge_center.sql']) {
+    for (const name of ['001_service_desk.sql', '002_knowledge_center.sql', '003_knowledge_publication.sql']) {
       const migration = await readFile(fileURLToPath(new URL(`../migrations/mysql/${name}`, import.meta.url)), 'utf8')
       expect(verifyMysqlSchemaStyle(migration)).toEqual([])
     }

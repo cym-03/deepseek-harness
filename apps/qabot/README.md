@@ -47,6 +47,8 @@ The portal base64url-encodes the UTF-8 JSON identity claims and signs that encod
 | `GET /v1/agent/tickets/:id` | Read an authorized ticket and its public replies |
 | `POST /v1/agent/tickets/:id/accept` | Accept using the signed `employeeId` and `{ version }` |
 | `POST /v1/agent/tickets/:id/reply` | Append `{ message, version }` and enter `waiting_employee` |
+| `POST /v1/knowledge/versions/:id/publish` | Publish a reviewed version with optional `{ effectiveAt, expiresAt }` |
+| `POST /v1/knowledge/:source/publication` | Set `{ online }` without deleting versions or vectors |
 | `GET /v1/system/audit` | Let SystemAdmin query privileged-operation audit records |
 
 ## HTTP API
@@ -185,6 +187,7 @@ Allow inbound TCP port 3100 in Windows Firewall when the host policy requires it
 - **Relay balance:** the configured relay can return `Insufficient Balance`, which closes model streams until provider balance is available.
 - **Empty-response retry:** a relay-induced empty turn retries once; a second empty result returns a readable temporary-service error and hides the retry instruction from the transcript.
 - **Persistent incremental vectors:** `kb.db` retains text and visual rows. Only a changed content hash, model, or dimension invalidates a row; `vision_assets` retains image bytes across model changes.
+- **Knowledge publication:** offline, not-yet-effective, and expired documents are excluded from keyword, text-vector, visual-vector, and returned-image retrieval. Reactivation reuses unchanged vectors.
 - **Visual retrieval:** `VISION_EMBED_MODEL=qwen3-vl-embedding` downloads Feishu document images and enables text-to-image retrieval. The application needs permission to download cloud-document media.
 - **Feishu permission:** the application needs scopes such as `im:message:send_as_bot`; failed notifications degrade to logs.
 - Tools use `defineTool`; direct registration does not convert parameters to JSON Schema and is rejected by the relay.

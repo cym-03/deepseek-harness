@@ -566,9 +566,26 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
   route('POST', '/v1/knowledge/versions/<id>/publish', async (ctx) => {
     const identity = requireKnowledgeReviewer(ctx)
     const id = Number(ctx.params.id)
-    if (!kb.publishVersion(id, identity.employeeId)) throw new Error('KNOWLEDGE_REVIEW_CONFLICT')
+    const body = ctx.json as { effectiveAt?: unknown; expiresAt?: unknown }
+    const parsePublicationTime = (value: unknown): number | null | undefined => {
+      if (value === undefined) return undefined
+      if (value === null || value === '') return null
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+        throw new Error('KNOWLEDGE_PUBLICATION_INVALID')
+      }
+      return Math.trunc(value)
+    }
+    const effectiveAt = parsePublicationTime(body.effectiveAt)
+    const expiresAt = parsePublicationTime(body.expiresAt)
+    if (effectiveAt !== undefined && effectiveAt !== null && expiresAt !== undefined && expiresAt !== null && expiresAt <= effectiveAt) {
+      throw new Error('KNOWLEDGE_PUBLICATION_INVALID')
+    }
+    if (!kb.publishVersion(id, identity.employeeId, {
+      ...(effectiveAt !== undefined ? { effectiveAt } : {}),
+      ...(expiresAt !== undefined ? { expiresAt } : {}),
+    })) throw new Error('KNOWLEDGE_REVIEW_CONFLICT')
     const embedded = await kb.embedMissing()
-    await audit.append({ actorId: identity.employeeId, action: 'knowledge.version.publish', resourceType: 'knowledge-version', resourceId: String(id), detail: JSON.stringify({ embedded }) })
+    await audit.append({ actorId: identity.employeeId, action: 'knowledge.version.publish', resourceType: 'knowledge-version', resourceId: String(id), detail: JSON.stringify({ embedded, effectiveAt, expiresAt }) })
     return { ok: true, embedded }
   })
 
@@ -653,6 +670,23 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     kb.remove(ctx.params.source ?? '')
     await audit.append({ actorId: identity.employeeId, action: 'knowledge.archive', resourceType: 'knowledge', resourceId: ctx.params.source ?? '', detail: null })
     return { ok: true }
+  })
+
+  route('POST', '/v1/knowledge/<source>/publication', async (ctx) => {
+    const identity = requireKnowledgeReviewer(ctx)
+    const body = ctx.json as { online?: unknown }
+    if (typeof body.online !== 'boolean') throw new Error('KNOWLEDGE_PUBLICATION_INVALID')
+    const source = ctx.params.source ?? ''
+    if (!kb.setPublication(source, body.online)) throw new Error('KNOWLEDGE_VERSION_NOT_FOUND')
+    const embedded = body.online ? await kb.embedMissing() : 0
+    await audit.append({
+      actorId: identity.employeeId,
+      action: body.online ? 'knowledge.publish.online' : 'knowledge.publish.offline',
+      resourceType: 'knowledge',
+      resourceId: source,
+      detail: JSON.stringify({ embedded }),
+    })
+    return { ok: true, online: body.online, embedded }
   })
 
   route('GET', '/v1/analytics/weekly', async (ctx) => {
@@ -1280,8 +1314,8 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
           send(res, 400, { code: msg, message: '评分必须为 1-5' })
           return
         }
-        if (msg === 'TRANSFER_TARGET_INVALID' || msg === 'STAFF_INVALID' || msg === 'KNOWLEDGE_URL_INVALID') {
-          send(res, 400, { code: msg, message: msg === 'TRANSFER_TARGET_INVALID' ? '请选择目标服务组中已启用的服务人员' : msg === 'STAFF_INVALID' ? '服务人员标识不能为空' : '请输入有效的飞书文档链接' })
+        if (msg === 'TRANSFER_TARGET_INVALID' || msg === 'STAFF_INVALID' || msg === 'KNOWLEDGE_URL_INVALID' || msg === 'KNOWLEDGE_PUBLICATION_INVALID') {
+          send(res, 400, { code: msg, message: msg === 'TRANSFER_TARGET_INVALID' ? '请选择目标服务组中已启用的服务人员' : msg === 'STAFF_INVALID' ? '服务人员标识不能为空' : msg === 'KNOWLEDGE_PUBLICATION_INVALID' ? '知识上下架状态或生效时间无效' : '请输入有效的飞书文档链接' })
           return
         }
         if (msg === 'STAFF_NOT_FOUND') {

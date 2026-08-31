@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-27-qabot-knowledge-center-schema.md
-2026-08-27-qabot-knowledge-center-schema.md: 3e579dde0c1a8fe950c1bd6e09fa169ba85dbaf3
-2026-08-27-qabot-knowledge-center-schema.zh.md: 3093a1f0238ab04bf5a6ab38f3cc84c55493fec9
+2026-08-27-qabot-knowledge-center-schema.md: 4e5ce34da5d348b5b2d35bf80bab17c8dc4347e3
+2026-08-27-qabot-knowledge-center-schema.zh.md: 81110bb4b7fbf4964c74821878552e46164b3eb1

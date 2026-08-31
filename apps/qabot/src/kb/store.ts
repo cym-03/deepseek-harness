@@ -46,6 +46,12 @@ interface DocRow {
   url: string | null
 }
 
+/** Optional publication window applied to every chunk of one reviewed version. */
+export interface KnowledgePublicationWindow {
+  effectiveAt?: number | null
+  expiresAt?: number | null
+}
+
 const TEXT_VECTOR_KIND = 'text'
 const VISION_VECTOR_KIND = 'vision'
 
@@ -87,7 +93,11 @@ export class KbStore {
         source TEXT NOT NULL,
         content TEXT NOT NULL,
         url TEXT,
-        hash TEXT
+        hash TEXT,
+        online INTEGER NOT NULL DEFAULT 1,
+        effective_at INTEGER,
+        expires_at INTEGER,
+        version_id INTEGER
       );
       CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts USING fts5(
         content,
@@ -129,6 +139,8 @@ export class KbStore {
         status TEXT NOT NULL DEFAULT 'pending_review',
         created_at INTEGER NOT NULL,
         published_at INTEGER,
+        effective_at INTEGER,
+        expires_at INTEGER,
         reviewed_by TEXT
       );
       CREATE UNIQUE INDEX IF NOT EXISTS uq_knowledge_version_hash
@@ -160,6 +172,25 @@ export class KbStore {
     for (const col of ['url TEXT', 'hash TEXT']) {
       try {
         this.db.exec(`ALTER TABLE docs ADD COLUMN ${col}`)
+      } catch {
+        // 列已存在
+      }
+    }
+    for (const col of [
+      'online INTEGER NOT NULL DEFAULT 1',
+      'effective_at INTEGER',
+      'expires_at INTEGER',
+      'version_id INTEGER',
+    ]) {
+      try {
+        this.db.exec(`ALTER TABLE docs ADD COLUMN ${col}`)
+      } catch {
+        // 列已存在
+      }
+    }
+    for (const col of ['effective_at INTEGER', 'expires_at INTEGER']) {
+      try {
+        this.db.exec(`ALTER TABLE knowledge_versions ADD COLUMN ${col}`)
       } catch {
         // 列已存在
       }
@@ -203,7 +234,13 @@ export class KbStore {
    * 向量表持久保留，不会每次启动重建。返回本次嵌入条数。
    */
   async embedMissing(): Promise<number> {
-    const all = this.db.prepare('SELECT id, content FROM docs').all() as unknown as Array<{ id: number; content: string }>
+    const now = Date.now()
+    const all = this.db.prepare(`
+      SELECT id, content FROM docs
+      WHERE online = 1
+        AND (effective_at IS NULL OR effective_at <= ?)
+        AND (expires_at IS NULL OR expires_at > ?)
+    `).all(now, now) as unknown as Array<{ id: number; content: string }>
     if (all.length === 0) return 0
     buildIndex(all) // 兜底字符向量用 IDF；远程语义模式忽略
     const docs = all.map(doc => ({ ...doc, hash: embeddingContentHash(doc.content) }))
@@ -316,8 +353,12 @@ export class KbStore {
     const rows = this.db.prepare(`
       SELECT a.doc_id, a.mime, a.image, a.content_hash, e.model, e.hash
       FROM vision_assets a
+      JOIN docs d ON d.id = a.doc_id
       LEFT JOIN embeddings e ON e.doc_id = a.doc_id AND e.vector_kind = ?
-    `).all(VISION_VECTOR_KIND) as unknown as Array<{
+      WHERE d.online = 1
+        AND (d.effective_at IS NULL OR d.effective_at <= ?)
+        AND (d.expires_at IS NULL OR d.expires_at > ?)
+    `).all(VISION_VECTOR_KIND, Date.now(), Date.now()) as unknown as Array<{
       doc_id: number
       mime: string
       image: Uint8Array
@@ -367,7 +408,10 @@ export class KbStore {
       JOIN embeddings e ON e.doc_id = d.id
       JOIN vision_assets a ON a.doc_id = d.id
       WHERE e.vector_kind = ? AND e.model = ?
-    `).all(VISION_VECTOR_KIND, visionModelKey()) as unknown as Array<{
+        AND d.online = 1
+        AND (d.effective_at IS NULL OR d.effective_at <= ?)
+        AND (d.expires_at IS NULL OR d.expires_at > ?)
+    `).all(VISION_VECTOR_KIND, visionModelKey(), Date.now(), Date.now()) as unknown as Array<{
       id: number
       title: string
       url: string | null
@@ -474,7 +518,13 @@ export class KbStore {
    * 增量写入分块（diff）：只删除/新增内容变化的分块，未变化的保留原 id（向量复用）。
    * 这样定时同步时 embedding 只补变化部分，节省 API 额度。
    */
-  upsertChunks(source: string, chunks: readonly string[], title: string, url?: string): void {
+  upsertChunks(
+    source: string,
+    chunks: readonly string[],
+    title: string,
+    url?: string,
+    publication: KnowledgePublicationWindow & { online?: boolean; versionId?: number | null } = {},
+  ): void {
     const existing = this.db.prepare('SELECT id, hash FROM docs WHERE source = ?').all(source) as unknown as Array<{ id: number; hash: string | null }>
     const newHashes = chunks.map(chunk => createHash('sha1').update(chunk).digest('hex'))
     const existingByHash = new Map(existing.filter(r => r.hash !== null).map(r => [r.hash as string, r.id]))
@@ -489,15 +539,39 @@ export class KbStore {
         this.db.prepare(`DELETE FROM docs WHERE id IN (${placeholders})`).run(...toDelete)
       }
       // 插入新增块。
-      const insert = this.db.prepare(
-        'INSERT INTO docs (title, source, content, url, hash) VALUES (?, ?, ?, ?, ?)',
-      )
+      const insert = this.db.prepare(`
+        INSERT INTO docs (
+          title, source, content, url, hash, online, effective_at, expires_at, version_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
       for (let i = 0; i < chunks.length; i++) {
         const chunk = chunks[i]
         const hash = newHashes[i]
         if (chunk === undefined || hash === undefined || existingByHash.has(hash)) continue
-        insert.run(title, source, chunk, url ?? null, hash)
+        insert.run(
+          title,
+          source,
+          chunk,
+          url ?? null,
+          hash,
+          publication.online === false ? 0 : 1,
+          publication.effectiveAt ?? null,
+          publication.expiresAt ?? null,
+          publication.versionId ?? null,
+        )
       }
+      this.db.prepare(`
+        UPDATE docs SET title = ?, url = ?, online = ?, effective_at = ?, expires_at = ?, version_id = ?
+        WHERE source = ?
+      `).run(
+        title,
+        url ?? null,
+        publication.online === false ? 0 : 1,
+        publication.effectiveAt ?? null,
+        publication.expiresAt ?? null,
+        publication.versionId ?? null,
+        source,
+      )
       this.db.exec('COMMIT;')
     } catch (error) {
       this.db.exec('ROLLBACK;')
@@ -543,20 +617,34 @@ export class KbStore {
   }
 
   /** Publishes one reviewed version and archives the previous published version for the source. */
-  publishVersion(versionId: number, reviewer: string): boolean {
+  publishVersion(
+    versionId: number,
+    reviewer: string,
+    publication: KnowledgePublicationWindow = {},
+  ): boolean {
+    const effectiveAt = publication.effectiveAt ?? null
+    const expiresAt = publication.expiresAt ?? null
+    if (effectiveAt !== null && (!Number.isFinite(effectiveAt) || effectiveAt < 0)) return false
+    if (expiresAt !== null && (!Number.isFinite(expiresAt) || expiresAt < 0)) return false
+    if (effectiveAt !== null && expiresAt !== null && expiresAt <= effectiveAt) return false
     const version = this.db.prepare(`
       SELECT id, source, title, url, chunks_json
       FROM knowledge_versions WHERE id = ? AND status = 'pending_review'
     `).get(versionId) as { id: number; source: string; title: string; url: string | null; chunks_json: string } | undefined
     if (version === undefined) return false
     const chunks = JSON.parse(version.chunks_json) as string[]
-    this.upsertChunks(version.source, chunks, version.title, version.url ?? undefined)
+    this.upsertChunks(version.source, chunks, version.title, version.url ?? undefined, {
+      online: true,
+      effectiveAt,
+      expiresAt,
+      versionId,
+    })
     const now = Date.now()
     this.db.prepare("UPDATE knowledge_versions SET status = 'archived' WHERE source = ? AND status = 'published'").run(version.source)
     this.db.prepare(`
-      UPDATE knowledge_versions SET status = 'published', published_at = ?, reviewed_by = ?
+      UPDATE knowledge_versions SET status = 'published', published_at = ?, effective_at = ?, expires_at = ?, reviewed_by = ?
       WHERE id = ? AND status = 'pending_review'
-    `).run(now, reviewer, versionId)
+    `).run(now, effectiveAt, expiresAt, reviewer, versionId)
     return true
   }
 
@@ -596,11 +684,42 @@ export class KbStore {
   }
 
   /** 知识库条目列表（按来源聚合，含原文链接）。 */
-  list(): Array<{ source: string; title: string; chunks: number; url: string | null }> {
+  list(): Array<{
+    source: string
+    title: string
+    chunks: number
+    url: string | null
+    publicationStatus: 'online' | 'scheduled' | 'offline'
+    effectiveAt: number | null
+    expiresAt: number | null
+  }> {
+    const now = Date.now()
     return this.db.prepare(`
-      SELECT source, title, COUNT(*) AS chunks, MAX(url) AS url
+      SELECT source, title, COUNT(*) AS chunks, MAX(url) AS url,
+        CASE
+          WHEN MIN(online) = 0 THEN 'offline'
+          WHEN MIN(effective_at) IS NOT NULL AND MIN(effective_at) > ? THEN 'scheduled'
+          WHEN MAX(expires_at) IS NOT NULL AND MAX(expires_at) <= ? THEN 'offline'
+          ELSE 'online'
+        END AS publicationStatus,
+        MIN(effective_at) AS effectiveAt,
+        MAX(expires_at) AS expiresAt
       FROM docs GROUP BY source, title ORDER BY MIN(id)
-    `).all() as unknown as Array<{ source: string; title: string; chunks: number; url: string | null }>
+    `).all(now, now) as unknown as Array<{
+      source: string
+      title: string
+      chunks: number
+      url: string | null
+      publicationStatus: 'online' | 'scheduled' | 'offline'
+      effectiveAt: number | null
+      expiresAt: number | null
+    }>
+  }
+
+  /** Changes whether one source participates in retrieval without deleting its versions or vectors. */
+  setPublication(source: string, online: boolean): boolean {
+    const result = this.db.prepare('UPDATE docs SET online = ? WHERE source = ?').run(online ? 1 : 0, source)
+    return Number(result.changes) > 0
   }
 
   /** 按来源删除（触发 FTS 同步删除）。 */
@@ -700,8 +819,11 @@ export class KbStore {
     const rows = this.db.prepare(
       `SELECT d.id, d.title, d.source, d.content, d.url, e.vector
        FROM docs d JOIN embeddings e ON e.doc_id = d.id
-       WHERE e.vector_kind = ?`,
-    ).all(TEXT_VECTOR_KIND) as unknown as Array<DocRow & { vector: string }>
+       WHERE e.vector_kind = ?
+         AND d.online = 1
+         AND (d.effective_at IS NULL OR d.effective_at <= ?)
+         AND (d.expires_at IS NULL OR d.expires_at > ?)`,
+    ).all(TEXT_VECTOR_KIND, Date.now(), Date.now()) as unknown as Array<DocRow & { vector: string }>
     if (rows.length === 0) return []
     const [qvec] = await embedTexts([query])
     if (qvec === undefined || Object.keys(qvec).length === 0) return []
@@ -720,7 +842,10 @@ export class KbStore {
       SELECT d.id, d.title, d.source, d.content, d.url, e.vector
       FROM docs d JOIN embeddings e ON e.doc_id = d.id
       WHERE e.vector_kind = ? AND e.model = ?
-    `).all(VISION_VECTOR_KIND, visionModelKey()) as unknown as Array<DocRow & { vector: string }>
+        AND d.online = 1
+        AND (d.effective_at IS NULL OR d.effective_at <= ?)
+        AND (d.expires_at IS NULL OR d.expires_at > ?)
+    `).all(VISION_VECTOR_KIND, visionModelKey(), Date.now(), Date.now()) as unknown as Array<DocRow & { vector: string }>
     if (rows.length === 0) return []
     const queryVector = await this.cachedVisionQueryVector(query)
     return rows.map(row => ({
@@ -756,9 +881,12 @@ export class KbStore {
         FROM docs_fts
         JOIN docs d ON d.id = docs_fts.rowid
         WHERE docs_fts MATCH ?
+          AND d.online = 1
+          AND (d.effective_at IS NULL OR d.effective_at <= ?)
+          AND (d.expires_at IS NULL OR d.expires_at > ?)
         ORDER BY bm25(docs_fts)
         LIMIT ?
-      `).all(phrase(query), limit) as unknown as DocRow[]
+      `).all(phrase(query), Date.now(), Date.now(), limit) as unknown as DocRow[]
     } catch {
       // trigram 对特殊语法可能报错，回落按词匹配
       return []
@@ -770,7 +898,12 @@ export class KbStore {
   private searchTerms(query: string, limit: number): DocRow[] {
     const terms = query.split(/[\s,，。、！!？?;；:：()（）]+/).filter(t => t.length >= 2)
     if (terms.length === 0) return []
-    const all = this.db.prepare('SELECT id, title, source, content, url FROM docs').all() as unknown as DocRow[]
+    const all = this.db.prepare(`
+      SELECT id, title, source, content, url FROM docs
+      WHERE online = 1
+        AND (effective_at IS NULL OR effective_at <= ?)
+        AND (expires_at IS NULL OR expires_at > ?)
+    `).all(Date.now(), Date.now()) as unknown as DocRow[]
     const scored = all.map((row) => {
       const hay = `${row.title}\n${row.content}`
       let score = 0
