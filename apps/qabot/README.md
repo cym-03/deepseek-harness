@@ -152,7 +152,7 @@ The deployed business database is MySQL `hr_system`. MySQL migrations use consec
 pnpm --filter @deepseek-ai/dsh-qabot run db:migrate:mysql
 ```
 
-The MySQL provider implements Conversation, Ticket, Audit, and Outbox repositories. Configure `QABOT_DATABASE_BACKEND=mysql` and `QABOT_MYSQL_URL`; startup applies pending migrations. Real integration tests read only `QABOT_TEST_MYSQL_URL` and must not remain pointed at production.
+The MySQL provider implements Conversation, Ticket, Audit, and Outbox repositories. It also projects every knowledge snapshot into `knowledge_sources`, documents, versions, chunks, assets, and embeddings at startup and after synchronization, review, publication, or removal. Projection copies stored vectors without requesting embeddings; `kb.db` remains the rebuildable FTS and similarity-search cache during the repository cutover. Configure `QABOT_DATABASE_BACKEND=mysql` and `QABOT_MYSQL_URL`; startup applies pending migrations. Real integration tests read only `QABOT_TEST_MYSQL_URL` and must not remain pointed at production.
 
 Feishu handoff notifications and public-reply events first enter the Outbox. Delivery retries with exponential backoff up to eight times, and one idempotency key creates only one message. A stale handoff notification completes without sending when the ticket state has already changed.
 
@@ -186,7 +186,7 @@ Allow inbound TCP port 3100 in Windows Firewall when the host policy requires it
 
 - **Relay balance:** the configured relay can return `Insufficient Balance`, which closes model streams until provider balance is available.
 - **Empty-response retry:** a relay-induced empty turn retries once; a second empty result returns a readable temporary-service error and hides the retry instruction from the transcript.
-- **Persistent incremental vectors:** `kb.db` retains text and visual rows. Only a changed content hash, model, or dimension invalidates a row; `vision_assets` retains image bytes across model changes.
+- **Persistent incremental vectors:** `kb.db` retains text and visual rows. Only a changed content hash, model, or dimension invalidates a row; `vision_assets` retains image bytes across model changes. With MySQL enabled, the same rows and image bytes are projected into `hr_system` without recalculation.
 - **Knowledge publication:** offline, not-yet-effective, and expired documents are excluded from keyword, text-vector, visual-vector, and returned-image retrieval. Reactivation reuses unchanged vectors.
 - **Visual retrieval:** `VISION_EMBED_MODEL=qwen3-vl-embedding` downloads Feishu document images and enables text-to-image retrieval. The application needs permission to download cloud-document media.
 - **Feishu permission:** the application needs scopes such as `im:message:send_as_bot`; failed notifications degrade to logs.

@@ -52,6 +52,46 @@ export interface KnowledgePublicationWindow {
   expiresAt?: number | null
 }
 
+/** Durable knowledge snapshot exported without invoking an embedding provider. */
+export interface KnowledgeStorageSnapshot {
+  documents: KnowledgeStorageDocument[]
+  versions: KnowledgeStorageVersion[]
+}
+
+export interface KnowledgeStorageDocument {
+  source: string
+  title: string
+  url: string | null
+  online: boolean
+  effectiveAt: number | null
+  expiresAt: number | null
+  currentVersionId: number | null
+  chunks: KnowledgeStorageChunk[]
+}
+
+export interface KnowledgeStorageChunk {
+  localId: number
+  content: string
+  contentHash: string
+  embeddings: Array<{ kind: 'text' | 'vision'; model: string; contentHash: string; vector: EmbedVector }>
+  asset: { mime: string; image: Buffer; contentHash: string } | null
+}
+
+export interface KnowledgeStorageVersion {
+  localId: number
+  source: string
+  title: string
+  url: string | null
+  contentHash: string
+  chunks: string[]
+  status: 'pending_review' | 'published' | 'archived' | 'rejected'
+  createdAt: number
+  publishedAt: number | null
+  effectiveAt: number | null
+  expiresAt: number | null
+  reviewedBy: string | null
+}
+
 const TEXT_VECTOR_KIND = 'text'
 const VISION_VECTOR_KIND = 'vision'
 
@@ -714,6 +754,118 @@ export class KbStore {
       effectiveAt: number | null
       expiresAt: number | null
     }>
+  }
+
+  /** Exports documents, versions, assets, and existing vectors without calculating new vectors. */
+  storageSnapshot(): KnowledgeStorageSnapshot {
+    const rows = this.db.prepare(`
+      SELECT id, source, title, content, url, online, effective_at, expires_at, version_id
+      FROM docs ORDER BY source, id
+    `).all() as unknown as Array<{
+      id: number
+      source: string
+      title: string
+      content: string
+      url: string | null
+      online: number
+      effective_at: number | null
+      expires_at: number | null
+      version_id: number | null
+    }>
+    const embeddingRows = this.db.prepare(`
+      SELECT doc_id, vector, model, hash, vector_kind FROM embeddings ORDER BY doc_id
+    `).all() as unknown as Array<{
+      doc_id: number
+      vector: string
+      model: string | null
+      hash: string | null
+      vector_kind: string
+    }>
+    const assetRows = this.db.prepare(`
+      SELECT doc_id, mime, image, content_hash FROM vision_assets ORDER BY doc_id
+    `).all() as unknown as Array<{
+      doc_id: number
+      mime: string
+      image: Uint8Array
+      content_hash: string
+    }>
+    const embeddings = new Map<number, KnowledgeStorageChunk['embeddings']>()
+    for (const row of embeddingRows) {
+      if ((row.vector_kind !== 'text' && row.vector_kind !== 'vision') || row.model === null || row.hash === null) continue
+      const vector = JSON.parse(row.vector) as unknown
+      const valid = Array.isArray(vector)
+        ? vector.every(value => typeof value === 'number' && Number.isFinite(value))
+        : typeof vector === 'object' && vector !== null
+          && Object.values(vector).every(value => typeof value === 'number' && Number.isFinite(value))
+      if (!valid) continue
+      const list = embeddings.get(row.doc_id) ?? []
+      list.push({ kind: row.vector_kind, model: row.model, contentHash: row.hash, vector: vector as EmbedVector })
+      embeddings.set(row.doc_id, list)
+    }
+    const assets = new Map(assetRows.map(row => [row.doc_id, {
+      mime: row.mime,
+      image: Buffer.from(row.image),
+      contentHash: row.content_hash,
+    }]))
+    const grouped = new Map<string, KnowledgeStorageDocument>()
+    for (const row of rows) {
+      let document = grouped.get(row.source)
+      if (document === undefined) {
+        document = {
+          source: row.source,
+          title: row.title,
+          url: row.url,
+          online: row.online === 1,
+          effectiveAt: row.effective_at,
+          expiresAt: row.expires_at,
+          currentVersionId: row.version_id,
+          chunks: [],
+        }
+        grouped.set(row.source, document)
+      }
+      document.chunks.push({
+        localId: row.id,
+        content: row.content,
+        contentHash: embeddingContentHash(row.content),
+        embeddings: embeddings.get(row.id) ?? [],
+        asset: assets.get(row.id) ?? null,
+      })
+    }
+    const versions = this.db.prepare(`
+      SELECT id, source, title, url, content_hash, chunks_json, status, created_at,
+        published_at, effective_at, expires_at, reviewed_by
+      FROM knowledge_versions ORDER BY source, id
+    `).all() as unknown as Array<{
+      id: number
+      source: string
+      title: string
+      url: string | null
+      content_hash: string
+      chunks_json: string
+      status: KnowledgeStorageVersion['status']
+      created_at: number
+      published_at: number | null
+      effective_at: number | null
+      expires_at: number | null
+      reviewed_by: string | null
+    }>
+    return {
+      documents: [...grouped.values()],
+      versions: versions.map(row => ({
+        localId: row.id,
+        source: row.source,
+        title: row.title,
+        url: row.url,
+        contentHash: row.content_hash,
+        chunks: JSON.parse(row.chunks_json) as string[],
+        status: row.status,
+        createdAt: row.created_at,
+        publishedAt: row.published_at,
+        effectiveAt: row.effective_at,
+        expiresAt: row.expires_at,
+        reviewedBy: row.reviewed_by,
+      })),
+    }
   }
 
   /** Changes whether one source participates in retrieval without deleting its versions or vectors. */

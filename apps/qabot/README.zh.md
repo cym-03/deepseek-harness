@@ -152,7 +152,7 @@ QABOT_DATABASE_URL=postgres://user:password@host:5432/qabot pnpm --filter @deeps
 pnpm --filter @deepseek-ai/dsh-qabot run db:migrate:mysql
 ```
 
-MySQL 后端提供完整的 Conversation、Ticket、Audit 和 Outbox Repository。部署配置为 `QABOT_DATABASE_BACKEND=mysql` 与 `QABOT_MYSQL_URL`；启动会自动执行待处理迁移。真实集成测试只读取 `QABOT_TEST_MYSQL_URL`，不得将其长期指向生产数据库。
+MySQL 后端提供完整的 Conversation、Ticket、Audit 和 Outbox Repository。服务启动以及知识同步、审核、发布、上下架或删除后，会把知识来源、文档、版本、分块、资产和向量快照投影到 `hr_system`。投影只复制已有向量，不会请求 embedding；Repository 切换期间 `kb.db` 仍是可重建的 FTS 与相似度检索缓存。部署配置为 `QABOT_DATABASE_BACKEND=mysql` 与 `QABOT_MYSQL_URL`；启动会自动执行待处理迁移。真实集成测试只读取 `QABOT_TEST_MYSQL_URL`，不得将其长期指向生产数据库。
 
 飞书转人工通知和人工公开回复先写入 `data/outbox.db`，HTTP 请求不等待飞书。后台任务按指数退避重试，最多八次；相同幂等键只入队一次。工单状态已变化的旧转人工通知会直接完成而不发送，避免转派后再通知旧队列。
 
@@ -186,7 +186,7 @@ schtasks /Delete /TN "qabot-service" /F
 
 - **中转余额**：`192.168.10.61:3000` 间歇 `Insufficient Balance` → 偶发 STREAM_CLOSED，需充值。
 - **空回复自动重试**：中继异常导致回合空回复时自动重试一次，仍空则返回「模型服务暂时异常，请稍后重试」，不再让用户看到空白（重试的系统提示在会话转录中隐藏）。
-- **向量索引增量持久化**：向量表随 `kb.db` 持久保留，不会每次启动重建。文本和视觉向量分别使用 `text`/`vision` 类型；内容、模型或维度变化时只更新失效记录。飞书图片原始数据保存在 `vision_assets`，因此视觉模型切换后不需要依赖旧下载链接。
+- **向量索引增量持久化**：向量表随 `kb.db` 持久保留，不会每次启动重建。文本和视觉向量分别使用 `text`/`vision` 类型；内容、模型或维度变化时只更新失效记录。飞书图片原始数据保存在 `vision_assets`，因此视觉模型切换后不需要依赖旧下载链接。启用 MySQL 时，同一批向量和图片二进制会直接投影到 `hr_system`，不会重新计算。
 - **知识上下架**：已下架、未到生效时间和已过失效时间的文档不会进入关键词、文本向量、视觉向量或图片返回。重新上线会复用未变化的向量。
 - **视觉检索**：设置 `VISION_EMBED_MODEL=qwen3-vl-embedding` 后，飞书文档图片会下载并生成独立视觉向量。员工文本查询使用同一模型生成查询向量，与文本检索结果合并。需要飞书 `drive:drive:readonly` 下载权限。
 - **飞书权限**：应用需开通 `im:message:send_as_bot`（发消息）等权限，否则发送会降级为仅记日志。

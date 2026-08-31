@@ -42,12 +42,12 @@ function parseFeishuUrl(url: string): { kind: 'wiki' | 'docx'; token: string; ta
     const u = new URL(url)
     const path = u.pathname
     const tableId = u.searchParams.get('table') ?? undefined
-    const wiki = path.match(/\/wiki\/([A-Za-z0-9]+)/)
-    if (wiki !== null) return { kind: 'wiki', token: wiki[1]!, ...(tableId ? { tableId } : {}) }
-    const docx = path.match(/\/docx\/([A-Za-z0-9]+)/)
-    if (docx !== null) return { kind: 'docx', token: docx[1]! }
-    const base = path.match(/\/base\/([A-Za-z0-9]+)/)
-    if (base !== null) return { kind: 'wiki', token: base[1]!, ...(tableId ? { tableId } : {}) }
+    const wiki = path.match(/\/wiki\/([A-Za-z0-9]+)/)?.[1]
+    if (wiki !== undefined) return { kind: 'wiki', token: wiki, ...(tableId ? { tableId } : {}) }
+    const docx = path.match(/\/docx\/([A-Za-z0-9]+)/)?.[1]
+    if (docx !== undefined) return { kind: 'docx', token: docx }
+    const base = path.match(/\/base\/([A-Za-z0-9]+)/)?.[1]
+    if (base !== undefined) return { kind: 'wiki', token: base, ...(tableId ? { tableId } : {}) }
     return null
   } catch {
     return null
@@ -82,12 +82,14 @@ export interface QabotHttpOptions {
   /** 飞书知识源配置 + 同步入口（未提供则知识源接口不可用）。 */
   sources?: KbSourcesStore
   syncFeishu?: () => Promise<{ synced: number; failed: number; errors: string[] }>
+  /** Persists the current knowledge index without invoking embedding providers. */
+  projectKnowledge?: () => Promise<void>
   audit: AuditRepository
   outbox: OutboxRepository
 }
 
 export async function startHttpServer(options: QabotHttpOptions): Promise<ReturnType<typeof createServer>> {
-  const { qabot, tickets, kb, staff, audit, outbox, sources, syncFeishu } = options
+  const { qabot, tickets, kb, staff, audit, outbox, sources, syncFeishu, projectKnowledge } = options
   const token = process.env.QABOT_API_TOKEN
   if (token === undefined || token.trim() === '') {
     throw new Error('必须配置 QABOT_API_TOKEN（所有环境强制）。未配置时拒绝启动，防止内网机器绕过门户直接调用本服务；apps/qabot/start-qabot.bat 已内置默认令牌。')
@@ -585,6 +587,7 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
       ...(expiresAt !== undefined ? { expiresAt } : {}),
     })) throw new Error('KNOWLEDGE_REVIEW_CONFLICT')
     const embedded = await kb.embedMissing()
+    await projectKnowledge?.()
     await audit.append({ actorId: identity.employeeId, action: 'knowledge.version.publish', resourceType: 'knowledge-version', resourceId: String(id), detail: JSON.stringify({ embedded, effectiveAt, expiresAt }) })
     return { ok: true, embedded }
   })
@@ -593,6 +596,7 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     const identity = requireKnowledgeReviewer(ctx)
     const id = Number(ctx.params.id)
     if (!kb.rejectVersion(id, identity.employeeId)) throw new Error('KNOWLEDGE_REVIEW_CONFLICT')
+    await projectKnowledge?.()
     await audit.append({ actorId: identity.employeeId, action: 'knowledge.version.reject', resourceType: 'knowledge-version', resourceId: String(id), detail: null })
     return { ok: true }
   })
@@ -639,7 +643,12 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     const config = sources.load()
     if (parsed.kind === 'wiki') {
       config.wiki = config.wiki.filter(source => source.nodeToken !== parsed.token)
-      config.wiki.push({ nodeToken: parsed.token, title: item.title, url: item.url, ...(parsed.tableId ? { tableId: parsed.tableId } : {}) })
+      config.wiki.push({
+        nodeToken: parsed.token,
+        title: item.title,
+        url: item.url,
+        ...(parsed.tableId ? { tableId: parsed.tableId } : {}),
+      })
     } else {
       config.docx = config.docx.filter(source => source.id !== parsed.token)
       config.docx.push({ id: parsed.token, title: item.title, url: item.url })
@@ -653,6 +662,7 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
       kb.publishVersion(version.id, identity.employeeId)
       await kb.embedMissing()
     }
+    await projectKnowledge?.()
     await audit.append({ actorId: identity.employeeId, action: 'knowledge.review.approve', resourceType: 'knowledge-review', resourceId: String(id), detail: JSON.stringify({ synced: result.synced, errors: result.errors.length }) })
     return { ok: true, synced: result.synced, errors: result.errors }
   })
@@ -668,6 +678,7 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
   route('DELETE', '/v1/knowledge/<source>', async (ctx) => {
     const identity = requireSystemAdmin(ctx)
     kb.remove(ctx.params.source ?? '')
+    await projectKnowledge?.()
     await audit.append({ actorId: identity.employeeId, action: 'knowledge.archive', resourceType: 'knowledge', resourceId: ctx.params.source ?? '', detail: null })
     return { ok: true }
   })
@@ -679,6 +690,7 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     const source = ctx.params.source ?? ''
     if (!kb.setPublication(source, body.online)) throw new Error('KNOWLEDGE_VERSION_NOT_FOUND')
     const embedded = body.online ? await kb.embedMissing() : 0
+    await projectKnowledge?.()
     await audit.append({
       actorId: identity.employeeId,
       action: body.online ? 'knowledge.publish.online' : 'knowledge.publish.offline',
@@ -1003,11 +1015,13 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     }
     const chunks = kb.ingestText(title, content)
     const embedded = await kb.embedMissing()
+    await projectKnowledge?.()
     return { chunks, embedded }
   })
 
   route('DELETE', '/api/kb/<source>', async (ctx) => {
     kb.remove(ctx.params.source ?? '')
+    await projectKnowledge?.()
     return { ok: true }
   })
 
@@ -1044,7 +1058,15 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
       send(ctx.res, 501, { error: '未配置知识源' })
       return undefined
     }
-    const body = ctx.json as { kind?: unknown; id?: unknown; appToken?: unknown; tableId?: unknown; title?: unknown; fields?: unknown; nodeToken?: unknown }
+    const body = ctx.json as {
+      kind?: unknown
+      id?: unknown
+      appToken?: unknown
+      tableId?: unknown
+      title?: unknown
+      fields?: unknown
+      nodeToken?: unknown
+    }
     const config = sources.load()
     const kind = body.kind === 'docx' || body.kind === 'bitable' || body.kind === 'wiki' ? body.kind : null
     if (kind === null) {
@@ -1152,7 +1174,12 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     const config = sources.load()
     if (parsed.kind === 'wiki') {
       config.wiki = config.wiki.filter(s => s.nodeToken !== parsed.token)
-      config.wiki.push({ nodeToken: parsed.token, title: item.title, url: item.url, ...(parsed.tableId ? { tableId: parsed.tableId } : {}) })
+      config.wiki.push({
+        nodeToken: parsed.token,
+        title: item.title,
+        url: item.url,
+        ...(parsed.tableId ? { tableId: parsed.tableId } : {}),
+      })
     } else {
       config.docx = config.docx.filter(s => s.id !== parsed.token)
       config.docx.push({ id: parsed.token, title: item.title, url: item.url })

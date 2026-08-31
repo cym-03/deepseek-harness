@@ -73,6 +73,26 @@ describe('KbStore embedding persistence', () => {
     expect(afterPublication).toContain('新版报销流程')
   })
 
+  it('exports stored versions and existing vectors without calling an embedding provider', async () => {
+    delete process.env.EMBED_MODEL
+    const store = new KbStore(tempDb())
+    store.upsertChunks('manual:制度', ['已发布制度'], '制度')
+    expect(await store.embedMissing()).toBe(1)
+    const staged = store.stageChunks('manual:制度', ['待审核制度'], '制度')
+
+    const snapshot = store.storageSnapshot()
+
+    expect(snapshot.documents).toHaveLength(1)
+    expect(snapshot.documents[0]).toMatchObject({ source: 'manual:制度', online: true })
+    expect(snapshot.documents[0]?.chunks[0]?.embeddings).toEqual([
+      expect.objectContaining({ kind: 'text', model: expect.stringContaining('char-ngram-v1') }),
+    ])
+    expect(snapshot.versions).toEqual([
+      expect.objectContaining({ localId: staged.versionId, status: 'pending_review', chunks: ['待审核制度'] }),
+    ])
+    store.dispose()
+  })
+
   it('excludes offline, not-yet-effective, and expired documents from every retrieval path', async () => {
     delete process.env.EMBED_MODEL
     const store = new KbStore(tempDb())

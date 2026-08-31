@@ -136,6 +136,14 @@ async function cmdServe(): Promise<void> {
   const { qabot, repositories, dispose } = await buildQabot()
   const { tickets, audit, outbox } = repositories
   const kb = new KbStore(kbDbPath)
+  const projectKnowledge = repositories.knowledge === undefined
+    ? undefined
+    : async (): Promise<void> => {
+      const result = await repositories.knowledge?.replace(kb.storageSnapshot())
+      if (result !== undefined) {
+        console.log(`[kb-storage] MySQL 投影完成 documents=${result.documents} versions=${result.versions} chunks=${result.chunks} embeddings=${result.embeddings} assets=${result.assets}`)
+      }
+    }
   // 启动时检查向量索引：只补算失效分块（内容 hash / embedding 模型版本变更），其余复用已存向量。
   try {
     const n = await kb.embedMissing()
@@ -144,6 +152,7 @@ async function cmdServe(): Promise<void> {
       : '[kb] 向量索引已是最新，无需重建')
     const vision = await kb.embedVisionMissing()
     if (vision > 0) console.log(`[kb] 视觉向量增量补算 ${vision} 条`)
+    await projectKnowledge?.()
   } catch (error) {
     console.error('[kb] 向量索引失败:', error instanceof Error ? error.message : error)
   }
@@ -196,6 +205,7 @@ async function cmdServe(): Promise<void> {
       const result = await syncFeishuSources(feishu.client, kb, kbSources.load(), { appId: feishu.appId, appSecret: feishu.appSecret })
       const disabled = kbSources.disableWiki(result.disabledWiki)
       if (disabled > 0) console.warn(`[kb-sync] 已自动停用 ${disabled} 个不存在的 wiki 知识源`)
+      await projectKnowledge?.()
       return result
     }
     : undefined
@@ -222,6 +232,7 @@ async function cmdServe(): Promise<void> {
     staff,
     audit,
     outbox,
+    ...projectKnowledge !== undefined ? { projectKnowledge } : {},
     ...syncFeishu !== undefined ? { sources: kbSources, syncFeishu } : {},
   })
 
