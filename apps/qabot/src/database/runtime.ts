@@ -8,6 +8,7 @@ import { OutboxStore } from '../integration/outbox.ts'
 import { TicketStore } from '../ticket/store.ts'
 import { createMysqlPool, loadMysqlMigrations, migrateMysql } from './mysql-migrator.ts'
 import { MysqlKnowledgeProjection } from './mysql-knowledge-projection.ts'
+import { MysqlServicePolicyStore } from './mysql-service-policies.ts'
 import {
   MysqlAuditRepository,
   MysqlConversationRepository,
@@ -28,6 +29,7 @@ export interface QabotRepositories {
   audit: AuditRepository
   outbox: OutboxRepository
   knowledge?: MysqlKnowledgeProjection
+  servicePolicies?: MysqlServicePolicyStore
   dispose(): Promise<void>
 }
 
@@ -73,6 +75,7 @@ export async function createQabotRepositories(
       audit: new MysqlAuditRepository(pool),
       outbox: new MysqlOutboxRepository(pool),
       knowledge: new MysqlKnowledgeProjection(pool),
+      servicePolicies: new MysqlServicePolicyStore(pool),
       dispose: async () => { await pool.end() },
     }
   }

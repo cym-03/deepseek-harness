@@ -10,6 +10,7 @@ import type { TicketRepository } from '../domain/repositories.ts'
 
 export type TicketStatus = 'open' | 'waiting_agent' | 'in_service' | 'waiting_employee' | 'resolved' | 'closed' | 'reopened'
 export type TicketKind = 'ai' | 'human'
+export type TicketPriority = 'low' | 'normal' | 'high' | 'urgent'
 
 export interface Ticket {
   id: number
@@ -17,6 +18,7 @@ export interface Ticket {
   userKey: string
   kind: TicketKind
   status: TicketStatus
+  priority: TicketPriority
   department: string | null
   assignee: string | null
   question: string
@@ -24,6 +26,9 @@ export interface Ticket {
   serviceEnd: number | null
   satisfaction: number | null
   handoffReason: string | null
+  firstResponseDueAt: number | null
+  resolutionDueAt: number | null
+  firstAgentResponseAt: number | null
   createdAt: number
   updatedAt: number
   version: number
@@ -54,6 +59,7 @@ function rowToTicket(row: TicketRow): Ticket {
     userKey: row.user_key,
     kind: row.kind as TicketKind,
     status: row.status as TicketStatus,
+    priority: 'normal',
     department: row.department,
     assignee: row.assignee,
     question: row.question,
@@ -61,6 +67,9 @@ function rowToTicket(row: TicketRow): Ticket {
     serviceEnd: row.service_end,
     satisfaction: row.satisfaction,
     handoffReason: row.handoff_reason,
+    firstResponseDueAt: null,
+    resolutionDueAt: null,
+    firstAgentResponseAt: null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     version: row.version,

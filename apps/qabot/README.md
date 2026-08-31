@@ -48,8 +48,11 @@ The portal base64url-encodes the UTF-8 JSON identity claims and signs that encod
 | `GET /v1/agent/tickets/:id` | Read an authorized ticket and its public replies |
 | `POST /v1/agent/tickets/:id/accept` | Accept using the signed `employeeId` and `{ version }` |
 | `POST /v1/agent/tickets/:id/reply` | Append `{ message, version }` and enter `waiting_employee` |
+| `POST /v1/agent/tickets/:id/priority` | Set `{ priority, version }` with optimistic concurrency |
 | `POST /v1/knowledge/versions/:id/publish` | Publish a reviewed version with optional `{ effectiveAt, expiresAt }` |
 | `POST /v1/knowledge/:source/publication` | Set `{ online }` without deleting versions or vectors |
+| `GET /v1/system/service-policies` | List service-group priority and SLA policies as SystemAdmin |
+| `POST /v1/system/service-policies/:group` | Update one service-group policy as SystemAdmin |
 | `GET /v1/system/audit` | Let SystemAdmin query privileged-operation audit records |
 
 ## HTTP API
@@ -123,6 +126,8 @@ DEEPSEEK_BASE_URL=http://<relay>/v1 node --import tsx/esm apps/qabot/src/bin.ts 
 | `QABOT_MYSQL_URL` | none | Required when the business repository is MySQL |
 
 The service desk presents four states: pending, waiting for acceptance, processing, and completed. AI-only tickets remain pending, are visible only to supervisors, and complete after the idle timeout. Human handoffs wait for acceptance, enter processing after acceptance, and complete when service ends. A transfer selects both a service group and a specific member.
+
+The MySQL service-group policy sets each newly handed-off or transferred ticket's default priority, first-response deadline, and resolution deadline. The first public staff reply records the first-response time. Managers can change policies and individual priorities in the portal; both mutations are audited. Deadlines use elapsed minutes rather than a business-hours calendar.
 
 Ticket responses contain a monotonically increasing `version`. Agent mutations submit the most recently read version; a stale version or invalid state returns HTTP 409 so the client can refresh before deciding whether to retry.
 

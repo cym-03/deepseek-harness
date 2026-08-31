@@ -48,8 +48,11 @@ DEEPSEEK_BASE_URL=http://<relay>/v1 pnpm --filter @deepseek-ai/dsh-qabot run dev
 | `GET /v1/agent/tickets/:id` | 有权访问的工单详情和人工回复 |
 | `POST /v1/agent/tickets/:id/accept` | 使用签名身份中的 `employeeId` 接单，提交 `{ version }` |
 | `POST /v1/agent/tickets/:id/reply` | 提交 `{ message, version }`，追加公开回复并进入 `waiting_employee` |
+| `POST /v1/agent/tickets/:id/priority` | 使用乐观并发提交 `{ priority, version }` 修改优先级 |
 | `POST /v1/knowledge/versions/:id/publish` | 发布已审核版本，可提交 `{ effectiveAt, expiresAt }` |
 | `POST /v1/knowledge/:source/publication` | 设置 `{ online }`，不删除版本或向量 |
+| `GET /v1/system/service-policies` | SystemAdmin 查询服务组优先级与 SLA 策略 |
+| `POST /v1/system/service-policies/:group` | SystemAdmin 更新一个服务组策略 |
 | `GET /v1/system/audit` | SystemAdmin 查询特权操作审计记录 |
 
 ## HTTP 接口
@@ -123,6 +126,8 @@ DEEPSEEK_BASE_URL=http://<relay>/v1 node --import tsx/esm apps/qabot/src/bin.ts 
 | `QABOT_MYSQL_URL` | 无 | MySQL 连接 URL；MySQL 后端必填 |
 
 工单后台统一显示待处理、待接单、处理中和已完成。纯智能工单处于待处理，仅主管可见；超过空闲时限后自动进入已完成。转人工工单进入待接单，接单后进入处理中，结束服务后进入已完成。客服转接必须选择目标服务组及该组具体人员。
+
+MySQL 服务组策略为新转人工或转接的工单设置默认优先级、首次响应截止时间和解决截止时间。首次公开人工回复会记录首次响应时间。主管可在门户修改服务组策略和单张工单优先级，两类操作都写入审计日志。截止时间按自然经过分钟计算，不使用工作时间日历。
 
 工单响应包含单调递增的 `version`。客服修改接口必须回传最近读取的版本；版本过期或状态不允许时返回 HTTP 409，前端应刷新工单后再决定是否重试。
 
