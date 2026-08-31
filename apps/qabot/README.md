@@ -1,187 +1,189 @@
-# dsh-qabot —— 公司智能问答服务
+# dsh-qabot — Employee intelligent Q&A service
 
-基于 DeepSeek Harness（进程内嵌入）构建的公司内部智能问答服务，供**员工服务台门户**（NestJS）薄代理调用。
+English | [中文](README.zh.md)
 
-当前完成阶段 0 基线和阶段 1 的首个安全切片：持久化文本/视觉索引、门户签名身份、员工会话资源授权、同会话串行执行和版本化会话 API。工单、知识管理和运营接口仍通过兼容 `/api` 提供，迁移到领域模块后再移除兼容接口。
+An internal employee Q&A service embedded in DeepSeek Harness and called through the employee service desk portal's NestJS proxy.
 
-## 架构
+The current baseline includes persistent text and visual indexes, signed portal identity, employee conversation authorization, per-conversation serialized execution, and versioned conversation APIs. Ticket, knowledge-management, and operations endpoints remain available through the compatibility `/api` routes until their domain migrations are complete.
+
+## Architecture
 
 ```
-门户 App.vue (smart-qa/qa-admin) ──HTTP──→ qabot 服务 (node:http, 端口 3100)
+Portal App.vue (smart-qa/qa-admin) ──HTTP──→ Qabot service (node:http, port 3100)
                                               │
                           ┌───────────────────┴───────────────┐
-                          │ qabot 引擎（dsh 进程内）             │
+                          │ In-process dsh Qabot engine        │
                           │  agent-spine + llm-deepseek        │
                           │  kb_search + request_human_handoff │
                           │  ticket (SQLite) + session         │
                           └───────────────────┬───────────────┘
-                                              └─→ 飞书通知适配器（转人工卡片）
+                                              └─→ Feishu notification adapter
 ```
 
-## 运行
+## Running
 
-前置：仓库已 `pnpm install`；`DEEPSEEK_API_KEY` / `FEISHU_APP_ID` / `FEISHU_APP_SECRET` 在根 `.env`；`DEEPSEEK_BASE_URL` 由启动命令导出。
+Prerequisites: run `pnpm install`; provide `DEEPSEEK_API_KEY`, `FEISHU_APP_ID`, and `FEISHU_APP_SECRET` through the untracked root `.env`; export `DEEPSEEK_BASE_URL` in the launch environment.
 
 ```sh
-pnpm --filter @deepseek-ai/dsh-qabot run dev:ingest   # 索引 docs/ 知识库
-DEEPSEEK_BASE_URL=http://<中转>/v1 pnpm --filter @deepseek-ai/dsh-qabot run dev:serve   # 启动 HTTP 服务
+pnpm --filter @deepseek-ai/dsh-qabot run dev:ingest   # Index the docs/ knowledge base
+DEEPSEEK_BASE_URL=http://<relay>/v1 pnpm --filter @deepseek-ai/dsh-qabot run dev:serve   # Start HTTP
 ```
 
-环境变量：`QABOT_PORT`（默认 3100）、`QABOT_API_TOKEN`（兼容接口必填）、`QABOT_IDENTITY_SECRET`（门户与 Qabot 共享的身份签名密钥）、`PORTAL_URL`（卡片「进入后台」跳转）、`QABOT_STAFF_OPEN_IDS`（服务人员，逗号分隔）。密钥只从部署环境或未提交的根 `.env` 读取。
+The primary variables are `QABOT_PORT` (default 3100), `QABOT_API_TOKEN` (required for compatibility routes), `QABOT_IDENTITY_SECRET` (shared by the portal and Qabot), `PORTAL_URL` (service-card destination), and `QABOT_STAFF_OPEN_IDS` (comma-separated agents). Secrets come only from the deployment environment or an untracked `.env`.
 
-门户将 UTF-8 JSON 身份声明编码为 base64url，并对该字符串计算 HMAC-SHA256 签名，令牌格式为 `payload.signature`。请求使用 `Authorization: Bearer <token>`；身份包含 `subjectId`、`employeeId`、`displayName`、`departmentIds`、`roles`、`issuedAt` 和 `expiresAt`。
+The portal base64url-encodes the UTF-8 JSON identity claims and signs that encoded string with HMAC-SHA256. The token format is `payload.signature` and requests use `Authorization: Bearer <token>`. Claims contain `subjectId`, `employeeId`, `displayName`, `departmentIds`, `roles`, `issuedAt`, and `expiresAt`.
 
 ## Versioned employee API
 
-| 方法/路径 | 说明 |
+| Method/path | Description |
 |---|---|
-| `POST /v1/conversations` | 创建会话；员工身份取自签名令牌 |
-| `GET /v1/conversations` | 当前员工的会话列表 |
-| `GET /v1/conversations/:id/messages` | 当前员工的会话消息 |
-| `POST /v1/conversations/:id/messages` | 在会话中提问 `{ message }` |
-| `DELETE /v1/conversations/:id` | 归档当前员工的会话 |
-| `POST /v1/conversations/:id/rating` | 会话内提交 `{ ticketId, rating, version }` |
-| `GET /v1/agent/tickets` | 客服所属服务组的工单列表；SystemAdmin 可查看全部 |
-| `GET /v1/agent/tickets/:id` | 有权访问的工单详情和人工回复 |
-| `POST /v1/agent/tickets/:id/accept` | 使用签名身份中的 `employeeId` 接单，提交 `{ version }` |
-| `POST /v1/agent/tickets/:id/reply` | 提交 `{ message, version }`，追加公开回复并进入 `waiting_employee` |
-| `GET /v1/system/audit` | SystemAdmin 查询特权操作审计记录 |
+| `POST /v1/conversations` | Create a conversation using the signed employee identity |
+| `GET /v1/conversations` | List the current employee's conversations |
+| `GET /v1/conversations/:id/messages` | Read messages in an owned conversation |
+| `POST /v1/conversations/:id/messages` | Submit `{ message }` to an owned conversation |
+| `DELETE /v1/conversations/:id` | Archive an owned conversation |
+| `POST /v1/conversations/:id/rating` | Submit `{ ticketId, rating, version }` in the conversation |
+| `GET /v1/agent/tickets` | List tickets in the agent's service groups; SystemAdmin sees all |
+| `GET /v1/agent/tickets/:id` | Read an authorized ticket and its public replies |
+| `POST /v1/agent/tickets/:id/accept` | Accept using the signed `employeeId` and `{ version }` |
+| `POST /v1/agent/tickets/:id/reply` | Append `{ message, version }` and enter `waiting_employee` |
+| `GET /v1/system/audit` | Let SystemAdmin query privileged-operation audit records |
 
-## HTTP 接口
+## HTTP API
 
-| 方法/路径 | 说明 |
+| Method/path | Description |
 |---|---|
 | `POST /api/chat` | `{ userId, message }` → `{ text, ticketId, handoffRequested, serviceMs }` |
-| `GET /api/tickets` | 工单列表，`?status=&limit=` |
-| `GET /api/tickets/:id` | 工单详情 + 会话转录 |
-| `POST /api/tickets/:id/accept` | 接单 `{ assignee }` → in_service |
-| `POST /api/tickets/:id/reply` | 人工回复 `{ message }`（经飞书发给员工） |
-| `POST /api/tickets/:id/close` | 关闭 `{ satisfaction? }` |
-| `GET /api/kb` | 知识库条目 |
-| `POST /api/kb/ingest` | 手工录入 `{ title, content }` |
-| `DELETE /api/kb/:source` | 删除知识库条目 |
-| `GET /api/stats` | 服务统计 |
+| `GET /api/tickets` | List tickets with `?status=&limit=` |
+| `GET /api/tickets/:id` | Read ticket details and conversation transcript |
+| `POST /api/tickets/:id/accept` | Accept with `{ assignee }` and enter `in_service` |
+| `POST /api/tickets/:id/reply` | Add a public employee-visible reply `{ message }` |
+| `POST /api/tickets/:id/close` | Close with `{ satisfaction? }` |
+| `GET /api/kb` | List knowledge entries |
+| `POST /api/kb/ingest` | Ingest `{ title, content }` manually |
+| `DELETE /api/kb/:source` | Remove a knowledge source |
+| `GET /api/stats` | Read service statistics |
 
-## 鉴权
+## Authentication
 
-- 所有环境**强制** `QABOT_API_TOKEN`，缺失时拒绝启动（防止内网机器绕过门户直接调 3100）。
-- 除静态测试页 `/`、`/chat.html` 与 `/api/health` 外，所有 `/api/*` 请求必须携带请求头 `X-Qabot-Token: <令牌>`，否则返回 401。
-- 令牌值：`start-qabot.bat` 内置默认值，根 `.env` 写入同值（`loadEnv` 会读取）。
-- **门户 smart-qa 薄代理转发时必须在每个请求上带同值的 `X-Qabot-Token`**，否则门户所有请求 401。测试页 `/` 首次打开会弹窗输入令牌（存 localStorage）。
-- 想轮换令牌：改 `start-qabot.bat` 与 `.env` 里的同值，并同步门户侧配置。
+- Every environment requires `QABOT_API_TOKEN`; startup fails when it is missing so an internal client cannot bypass the portal and call port 3100 directly.
+- Except for `/`, `/chat.html`, and `/api/health`, every `/api/*` request carries `X-Qabot-Token: <token>` or receives HTTP 401.
+- Deployment owns the token value and supplies the same value to Qabot and the portal proxy.
+- The portal smart-QA proxy includes `X-Qabot-Token` on every compatibility request. The static test page stores a manually entered token in localStorage.
+- Rotate the token in the Qabot and portal deployment environments together.
 
-## 目录
+## Directory
 
 ```
 src/
-  bin.ts            入口（console | feishu | serve | ingest）
-  compose.ts        dsh 组合（persona、模型、持久化、插件）
-  runner.ts         Qabot 引擎：每用户一会话，问答→工单，转录
-  http/server.ts    HTTP 服务（node:http 零依赖）
-  feishu/           WS 网关（bot 入口已降级）+ 通知适配器（转人工卡片）
-  kb/               FTS5 知识库（node:sqlite，中文 trigram + LIKE 兜底）
-  ticket/           工单 SQLite 存储
-  migrations/       PostgreSQL 与 MySQL 单调迁移脚本
-  plugins/          kb_search / request_human_handoff 工具
-docs/               样例知识库（替换为公司真实文档）
-data/               （gitignore）运行时数据 + staff.json 服务人员名单
+  bin.ts            Entry point: console | feishu | serve | ingest
+  compose.ts        dsh composition: persona, model, persistence, plugins
+  runner.ts         Per-employee Qabot sessions, Q&A, ticket creation, transcript
+  http/server.ts    Dependency-free node:http server
+  feishu/           Notification adapter and legacy bot gateway
+  kb/               SQLite FTS5 and hybrid text/visual retrieval
+  ticket/           SQLite development ticket store
+  migrations/       Monotonic PostgreSQL and MySQL migrations
+  plugins/          kb_search and request_human_handoff tools
+docs/               Sample knowledge documents
+data/               Gitignored runtime data and service-agent configuration
 ```
 
-## 部署（内网服务）
+## Internal deployment
 
-### 启动（手动）
+### Manual startup
 ```sh
-# 一键启动脚本（Windows）——含中转地址等环境变量
+# Windows launcher with deployment environment
 apps/qabot/start-qabot.bat
 
-# 或手动：
+# Or start directly:
 cd d:\deepseek_q&a
-DEEPSEEK_BASE_URL=http://<中转>/v1 node --import tsx/esm apps/qabot/src/bin.ts serve
+DEEPSEEK_BASE_URL=http://<relay>/v1 node --import tsx/esm apps/qabot/src/bin.ts serve
 ```
 
-### 环境变量
-| 变量 | 默认 | 说明 |
+### Environment variables
+| Variable | Default | Description |
 |---|---|---|
-| `DEEPSEEK_BASE_URL` | 必填 | 中转网关（禁止写 .env，必须启动时导出） |
-| `QABOT_PORT` | 3100 | 服务端口 |
-| `QABOT_HOST` | 0.0.0.0 | 监听地址（内网访问用 0.0.0.0） |
-| `QABOT_SYNC_INTERVAL_MINUTES` | 30 | 知识库定时同步（0 关闭） |
-| `QABOT_API_TOKEN` | 必填 | 鉴权头 X-Qabot-Token；所有环境强制（缺失拒绝启动）。start-qabot.bat 内置默认值，根 .env 已写入同值 |
-| `QABOT_IDENTITY_SECRET` | 必填 | 校验门户短时签名身份令牌；不得提交到仓库 |
-| `QABOT_MAX_BODY_BYTES` | 1048576 | HTTP 请求体上限 |
-| `QABOT_MAX_MESSAGE_LENGTH` | 8000 | 单条员工消息字符上限 |
-| `QABOT_IDLE_CONVERSATION_MS` | 3600000 | 纯智能工单无活动后自动完成的时限 |
-| `QABOT_IDLE_SWEEP_MS` | 60000 | 空闲纯智能工单检查间隔 |
-| `QABOT_OUTBOX_INTERVAL_MS` | 1000 | 外部通知队列轮询间隔，最小 100 毫秒 |
-| `QABOT_DATABASE_URL` | 无 | PostgreSQL 连接 URL，数据库名使用 `hr_system` |
-| `QABOT_DATABASE_BACKEND` | sqlite | 业务数据后端；可选 `sqlite`、`mysql` 或 `postgres` |
-| `QABOT_MYSQL_URL` | 无 | MySQL 连接 URL；MySQL 后端必填 |
+| `DEEPSEEK_BASE_URL` | required | OpenAI-compatible relay URL; export it at launch |
+| `QABOT_PORT` | 3100 | Service port |
+| `QABOT_HOST` | 0.0.0.0 | Listener address |
+| `QABOT_SYNC_INTERVAL_MINUTES` | 30 | Scheduled knowledge synchronization; 0 disables it |
+| `QABOT_API_TOKEN` | required | Shared `X-Qabot-Token`; startup fails when missing |
+| `QABOT_IDENTITY_SECRET` | required | Verifies short-lived portal identities; never commit it |
+| `QABOT_MAX_BODY_BYTES` | 1048576 | Maximum HTTP request body size |
+| `QABOT_MAX_MESSAGE_LENGTH` | 8000 | Maximum employee message length |
+| `QABOT_IDLE_CONVERSATION_MS` | 3600000 | Idle timeout for AI-only tickets |
+| `QABOT_IDLE_SWEEP_MS` | 60000 | AI-only ticket timeout scan interval |
+| `QABOT_OUTBOX_INTERVAL_MS` | 1000 | External-notification polling interval, minimum 100 ms |
+| `QABOT_DATABASE_URL` | none | PostgreSQL URL; use database `hr_system` |
+| `QABOT_DATABASE_BACKEND` | sqlite | Business repository: `sqlite`, `mysql`, or `postgres` |
+| `QABOT_MYSQL_URL` | none | Required when the business repository is MySQL |
 
-工单后台统一显示待处理、待接单、处理中和已完成。纯智能工单处于待处理，仅主管可见；超过空闲时限后自动进入已完成。转人工工单进入待接单，接单后进入处理中，结束服务后进入已完成。客服转接必须选择目标服务组及该组具体人员。
+The service desk presents four states: pending, waiting for acceptance, processing, and completed. AI-only tickets remain pending, are visible only to supervisors, and complete after the idle timeout. Human handoffs wait for acceptance, enter processing after acceptance, and complete when service ends. A transfer selects both a service group and a specific member.
 
-工单响应包含单调递增的 `version`。客服修改接口必须回传最近读取的版本；版本过期或状态不允许时返回 HTTP 409，前端应刷新工单后再决定是否重试。
+Ticket responses contain a monotonically increasing `version`. Agent mutations submit the most recently read version; a stale version or invalid state returns HTTP 409 so the client can refresh before deciding whether to retry.
 
-应用服务依赖 Conversation、Ticket、Audit 和 Outbox Repository 接口；接口允许同步或异步实现，调用方统一 `await`，因此 SQLite、MySQL 和 PostgreSQL 可以替换而不修改业务规则。Qabot 引擎、HTTP 服务和模型转人工工具共享同一组 Repository。数据库启动时先执行对应后端的待处理迁移，再组合业务组件。
+Application services depend on Conversation, Ticket, Audit, and Outbox repository interfaces. Callers await both synchronous and asynchronous implementations, so SQLite, MySQL, and PostgreSQL providers preserve the same business rules. Startup applies the selected provider's pending migrations before composing Qabot, HTTP, and handoff tools with one repository set.
 
-PostgreSQL 部署配置示例：
+PostgreSQL deployment example:
 
 ```env
 QABOT_DATABASE_BACKEND=postgres
 QABOT_DATABASE_URL=postgres://<user>:<password>@<host>:<port>/hr_system
 ```
 
-缺少连接 URL 时 PostgreSQL 模式拒绝启动，不会回落到 SQLite。
+PostgreSQL mode fails instead of falling back to SQLite when the connection URL is absent.
 
-PostgreSQL Outbox 使用 `FOR UPDATE SKIP LOCKED` 领取消息，并记录 worker 与五分钟租约；多个进程不会同时领取同一条任务，进程退出遗留的领取会在租约到期后恢复。
+The PostgreSQL Outbox claims messages with `FOR UPDATE SKIP LOCKED` and records a worker with a five-minute lease. Multiple processes do not claim the same message, and an abandoned claim becomes available after its lease expires.
 
-仅在明确指定的 PostgreSQL 数据库执行迁移：
+Apply migrations only to an explicitly selected PostgreSQL database:
 
 ```sh
 QABOT_DATABASE_URL=postgres://user:password@host:5432/qabot pnpm --filter @deepseek-ai/dsh-qabot run db:migrate:postgres
 ```
 
-迁移命令缺少 `QABOT_DATABASE_URL` 时拒绝执行。连接字符串只放部署环境，不提交到仓库。
+The migration command fails when `QABOT_DATABASE_URL` is absent. Keep connection strings only in the deployment environment.
 
-实际部署数据库为 MySQL `hr_system`。MySQL 迁移按 `migrations/mysql/NNN_name.sql` 连续编号，并通过 `GET_LOCK` 串行执行。MySQL DDL 会隐式提交，迁移器因此在执行前写入 `dirty=1`；执行中断后会拒绝继续迁移，要求先人工确认数据库状态，避免把部分建表误记为完成。
+The deployed business database is MySQL `hr_system`. MySQL migrations use consecutive `migrations/mysql/NNN_name.sql` names and serialize through `GET_LOCK`. Because MySQL DDL commits implicitly, the migrator records `dirty=1` before execution and refuses to continue after an interrupted migration until an operator verifies the database state.
 
 ```sh
 pnpm --filter @deepseek-ai/dsh-qabot run db:migrate:mysql
 ```
 
-MySQL 后端提供完整的 Conversation、Ticket、Audit 和 Outbox Repository。部署配置为 `QABOT_DATABASE_BACKEND=mysql` 与 `QABOT_MYSQL_URL`；启动会自动执行待处理迁移。真实集成测试只读取 `QABOT_TEST_MYSQL_URL`，不得将其长期指向生产数据库。
+The MySQL provider implements Conversation, Ticket, Audit, and Outbox repositories. Configure `QABOT_DATABASE_BACKEND=mysql` and `QABOT_MYSQL_URL`; startup applies pending migrations. Real integration tests read only `QABOT_TEST_MYSQL_URL` and must not remain pointed at production.
 
-飞书转人工通知和人工公开回复先写入 `data/outbox.db`，HTTP 请求不等待飞书。后台任务按指数退避重试，最多八次；相同幂等键只入队一次。工单状态已变化的旧转人工通知会直接完成而不发送，避免转派后再通知旧队列。
+Feishu handoff notifications and public-reply events first enter the Outbox. Delivery retries with exponential backoff up to eight times, and one idempotency key creates only one message. A stale handoff notification completes without sending when the ticket state has already changed.
 
-满意度在员工门户聊天界面完成，不通过飞书卡片。工单处于 `resolved` 或 `closed` 时，所属员工可提交一次 1-5 分评价；请求必须携带工单最新 `version`，重复评价或版本冲突返回 HTTP 409。工单不存储服务评论字段。
-| `PORTAL_URL` | http://localhost:5173 | 转人工卡片「进入后台」跳转地址 |
-| `VISION_EMBED_MODEL` | 未启用 | 视觉向量模型；推荐 `qwen3-vl-embedding`，配置后同步飞书文档图片并启用文搜图 |
-| `VISION_EMBED_API_KEY` | `EMBED_API_KEY` | 百炼 API Key；视觉模型使用 DashScope 多模态接口，不走 OpenAI `/embeddings` |
-| `VISION_EMBED_BASE_URL` | `https://dashscope.aliyuncs.com/api/v1` | DashScope 多模态 API 地址 |
-| `VISION_EMBED_DIMENSION` | 1024 | 视觉向量维度；修改后已有视觉向量会自动增量重算 |
+Employees submit satisfaction scores in the portal conversation rather than Feishu. An employee can rate an owned `resolved` or `closed` ticket once with a score from 1 to 5 and the latest ticket `version`. Duplicate scores and version conflicts return HTTP 409. Tickets do not store a service-comment field.
+| `PORTAL_URL` | http://localhost:5173 | Service-card administration destination |
+| `VISION_EMBED_MODEL` | disabled | Visual model; `qwen3-vl-embedding` enables image ingestion and text-to-image retrieval |
+| `VISION_EMBED_API_KEY` | `EMBED_API_KEY` | DashScope key for the multimodal endpoint |
+| `VISION_EMBED_BASE_URL` | `https://dashscope.aliyuncs.com/api/v1` | DashScope multimodal API base URL |
+| `VISION_EMBED_DIMENSION` | 1024 | Visual vector dimension; changing it invalidates visual vectors |
 
-### 日志
-- 控制台 + `apps/qabot/data/qabot.log`（带时间戳/级别）
-- 运行数据都在 `apps/qabot/data/`：`kb.db`/`tickets.db`/`conversations.db`/`kb-sources.json`/`staff.json`
+### Logging
+- Console and timestamped `apps/qabot/data/qabot.log` output.
+- Runtime data lives under `apps/qabot/data/`, including `kb.db`, local development repositories, sources, and staff configuration.
 
-### 开机自启（Windows 任务计划程序）
+### Windows scheduled startup
 ```powershell
-# 用管理员 PowerShell，注册开机自启任务（登录时运行，需换成本机实际路径）
+# Register an on-login task from an elevated PowerShell; use the actual local path
 schtasks /Create /TN "qabot-service" /TR "cmd /c D:\deepseek_q&a\apps\qabot\start-qabot.bat" /SC ONLOGON /RL HIGHEST /F
-# 手动运行一次测试
+# Run it once for verification
 schtasks /Run /TN "qabot-service"
-# 删除任务
+# Remove the task
 schtasks /Delete /TN "qabot-service" /F
 ```
 
-### 内网访问
-服务监听 `0.0.0.0:3100`，局域网内通过 `http://<本机IP>:3100/` 访问测试页。
-注意：Windows 防火墙需放行 3100 端口（`netsh advfirewall firewall add rule name="qabot" dir=in action=allow protocol=TCP localport=3100`）。
+### LAN access
+The service listens on `0.0.0.0:3100`; internal clients reach the test page at `http://<host-ip>:3100/`.
+Allow inbound TCP port 3100 in Windows Firewall when the host policy requires it.
 
-## 已知事项
+## Known constraints
 
-- **中转余额**：`192.168.10.61:3000` 间歇 `Insufficient Balance` → 偶发 STREAM_CLOSED，需充值。
-- **空回复自动重试**：中继异常导致回合空回复时自动重试一次，仍空则返回「模型服务暂时异常，请稍后重试」，不再让用户看到空白（重试的系统提示在会话转录中隐藏）。
-- **向量索引增量持久化**：向量表随 `kb.db` 持久保留，不会每次启动重建。文本和视觉向量分别使用 `text`/`vision` 类型；内容、模型或维度变化时只更新失效记录。飞书图片原始数据保存在 `vision_assets`，因此视觉模型切换后不需要依赖旧下载链接。
-- **视觉检索**：设置 `VISION_EMBED_MODEL=qwen3-vl-embedding` 后，飞书文档图片会下载并生成独立视觉向量。员工文本查询使用同一模型生成查询向量，与文本检索结果合并。需要飞书 `drive:drive:readonly` 下载权限。
-- **飞书权限**：应用需开通 `im:message:send_as_bot`（发消息）等权限，否则发送会降级为仅记日志。
-- 工具注册必须 `defineTool`（裸 register 的 parameters 不转 JSON Schema，中继拒收）。
+- **Relay balance:** the configured relay can return `Insufficient Balance`, which closes model streams until provider balance is available.
+- **Empty-response retry:** a relay-induced empty turn retries once; a second empty result returns a readable temporary-service error and hides the retry instruction from the transcript.
+- **Persistent incremental vectors:** `kb.db` retains text and visual rows. Only a changed content hash, model, or dimension invalidates a row; `vision_assets` retains image bytes across model changes.
+- **Visual retrieval:** `VISION_EMBED_MODEL=qwen3-vl-embedding` downloads Feishu document images and enables text-to-image retrieval. The application needs permission to download cloud-document media.
+- **Feishu permission:** the application needs scopes such as `im:message:send_as_bot`; failed notifications degrade to logs.
+- Tools use `defineTool`; direct registration does not convert parameters to JSON Schema and is rejected by the relay.

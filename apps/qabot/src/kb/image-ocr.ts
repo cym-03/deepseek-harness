@@ -125,6 +125,8 @@ export async function storeVisionAssets(
   let failed = 0
   let firstFailure = ''
   for (const hint of hints) {
+    const source = `${sourceBase}:vision:${hint.token}`
+    if (kb.hasVisionAssetSource(source)) continue
     const response = await fetch(`${API_BASE}/drive/v1/medias/${hint.token}/download`, { headers: auth })
     if (!response.ok) {
       failed += 1
@@ -132,6 +134,9 @@ export async function storeVisionAssets(
         const detail = (await response.text()).replaceAll(/\s+/g, ' ').slice(0, 300)
         firstFailure = `status=${response.status}${detail === '' ? '' : ` detail=${detail}`}`
       }
+      // A 403 applies to the app/document permission, not one image. Stop this run to avoid
+      // repeating the same denied request for every image in every scheduled synchronization.
+      if (response.status === 403) break
       continue
     }
     const mime = response.headers.get('content-type')?.split(';')[0] || 'image/png'
@@ -139,7 +144,7 @@ export async function storeVisionAssets(
     const description = `【文档图片】${hint.section || docTitle}`
       + (hint.caption === '' ? '' : `\n图片说明：${hint.caption}`)
     kb.upsertVisionAsset({
-      source: `${sourceBase}:vision:${hint.token}`,
+      source,
       title: `图片：${hint.caption || hint.section || docTitle}`,
       description,
       ...(url === undefined ? {} : { url }),
@@ -149,7 +154,10 @@ export async function storeVisionAssets(
     stored += 1
   }
   if (failed > 0) {
-    console.warn(`[kb-vision] ${docTitle} 图片下载失败 ${failed}/${hints.length}；${firstFailure}`)
+    const permissionHint = firstFailure.startsWith('status=403')
+      ? '；请为飞书应用开通“下载云文档素材”权限，发布应用版本，并将文档或知识库共享给该应用'
+      : ''
+    console.warn(`[kb-vision] ${docTitle} 图片下载失败 ${failed}/${hints.length}；${firstFailure}${permissionHint}`)
   }
   kb.pruneVisionAssets(sourceBase, activeSources)
   return stored

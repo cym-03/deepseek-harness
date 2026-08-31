@@ -12,6 +12,7 @@ const originalVisionModel = process.env.VISION_EMBED_MODEL
 const originalVisionBaseUrl = process.env.VISION_EMBED_BASE_URL
 const originalVisionApiKey = process.env.VISION_EMBED_API_KEY
 const originalVisionDimension = process.env.VISION_EMBED_DIMENSION
+const originalVisionMaxPerSync = process.env.VISION_EMBED_MAX_PER_SYNC
 const tempDirs: string[] = []
 
 function tempDb(): string {
@@ -35,6 +36,8 @@ function restoreEnv(): void {
   else process.env.VISION_EMBED_API_KEY = originalVisionApiKey
   if (originalVisionDimension === undefined) delete process.env.VISION_EMBED_DIMENSION
   else process.env.VISION_EMBED_DIMENSION = originalVisionDimension
+  if (originalVisionMaxPerSync === undefined) delete process.env.VISION_EMBED_MAX_PER_SYNC
+  else process.env.VISION_EMBED_MAX_PER_SYNC = originalVisionMaxPerSync
 }
 
 afterEach(() => {
@@ -227,5 +230,32 @@ describe('KbStore embedding persistence', () => {
     reopened.dispose()
     // 一次图片嵌入、一次问题嵌入；相同问题的后续检索全部复用持久缓存。
     expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('caps new visual embeddings per synchronization run', async () => {
+    process.env.VISION_EMBED_MODEL = 'qwen3-vl-embedding'
+    process.env.VISION_EMBED_BASE_URL = 'https://vision.test/api/v1'
+    process.env.VISION_EMBED_API_KEY = 'vision-key'
+    process.env.VISION_EMBED_MAX_PER_SYNC = '1'
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      output: { embeddings: [{ embedding: [1, 0] }] },
+    }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    const store = new KbStore(tempDb())
+    for (const token of ['image-1', 'image-2']) {
+      store.upsertVisionAsset({
+        source: `wiki:policy:vision:${token}`,
+        title: token,
+        description: token,
+        mime: 'image/png',
+        image: Buffer.from(token),
+      })
+    }
+
+    expect(await store.embedVisionMissing()).toBe(1)
+    expect(await store.embedVisionMissing()).toBe(1)
+    expect(await store.embedVisionMissing()).toBe(0)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    store.dispose()
   })
 })

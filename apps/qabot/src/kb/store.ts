@@ -280,6 +280,17 @@ export class KbStore {
     return row.id
   }
 
+  /** Returns whether a downloaded image token already has a durable local asset. */
+  hasVisionAssetSource(source: string): boolean {
+    return this.db.prepare(`
+      SELECT 1
+      FROM docs d
+      JOIN vision_assets a ON a.doc_id = d.id
+      WHERE d.source = ?
+      LIMIT 1
+    `).get(source) !== undefined
+  }
+
   /** 删除一个文档来源中已不存在的图片及其文本、视觉向量。 */
   pruneVisionAssets(sourceBase: string, activeSources: ReadonlySet<string>): number {
     const rows = this.db.prepare(
@@ -314,7 +325,13 @@ export class KbStore {
       model: string | null
       hash: string | null
     }>
-    const stale = rows.filter(row => row.model !== model || row.hash !== row.content_hash)
+    const configuredLimit = Number(process.env.VISION_EMBED_MAX_PER_SYNC ?? 20)
+    if (!Number.isInteger(configuredLimit) || configuredLimit <= 0) {
+      throw new Error('VISION_EMBED_MAX_PER_SYNC 必须是正整数')
+    }
+    const stale = rows
+      .filter(row => row.model !== model || row.hash !== row.content_hash)
+      .slice(0, configuredLimit)
     if (stale.length === 0) return 0
     const insert = this.db.prepare(`
       INSERT INTO embeddings (doc_id, vector, model, hash, vector_kind)
