@@ -1,0 +1,39 @@
+{
+  "name": "@deepseek-ai/dsh-qabot",
+  "description": "公司内部智能问答机器人网关：进程内嵌入 DeepSeek Harness agent，对接飞书，管理工单",
+  "version": "0.1.0-rc.5",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "dev:console": "node --import tsx/esm src/bootstrap.ts console",
+    "dev:feishu": "node --import tsx/esm src/bootstrap.ts feishu",
+    "dev:serve": "node --import tsx/esm src/bootstrap.ts serve",
+    "dev:ingest": "node --import tsx/esm src/bootstrap.ts ingest",
+    "db:migrate:postgres": "node --import tsx/esm src/bootstrap.ts migrate-postgres",
+    "db:migrate:mysql": "node --import tsx/esm src/bootstrap.ts migrate-mysql",
+    "typecheck": "tsc --noEmit",
+    "test": "pnpm --dir ../.. exec vitest run apps/qabot/tests"
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "workspace:^",
+    "@deepseek-ai/dsh-agent": "workspace:^",
+    "@deepseek-ai/dsh-agent-default-model": "workspace:^",
+    "@deepseek-ai/dsh-agent-spine-demo": "workspace:^",
+    "@deepseek-ai/dsh-llm": "workspace:^",
+    "@deepseek-ai/dsh-llm-deepseek": "workspace:^",
+    "@deepseek-ai/dsh-session": "workspace:^",
+    "@deepseek-ai/dsh-session-persistence-jsonl": "workspace:^",
+    "@deepseek-ai/dsh-tools": "workspace:^",
+    "@deepseek-ai/schemastery": "workspace:^",
+    "@larksuiteoapi/node-sdk": "^1.31.0",
+    "mysql2": "^3.24.2",
+    "postgres": "^3.4.9"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
+  }
+}

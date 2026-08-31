@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-27-qabot-mysql-schema-comments.md
+2026-08-27-qabot-mysql-schema-comments.md: 3e9ca44a98b3eccd7b539f90a2754c5218317b4e
+2026-08-27-qabot-mysql-schema-comments.zh.md: 8609c8d7e6477d20ae0abfe0679d8517086ccae7

@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>智能问答 · 测试页</title>
+<style>
+  :root { --bg:#f5f6f8; --panel:#fff; --ink:#1c2b35; --muted:#6b7a84; --line:#e4e7ea;
+          --blue:#2f7de1; --green:#2e9e5b; --orange:#e8953a; --red:#d64545; --nav:#1c2b35; --radius:12px; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: "PingFang SC","Microsoft YaHei",system-ui,sans-serif; background: var(--bg); color: var(--ink); height: 100vh; }
+  .app { display: flex; height: 100vh; }
+  /* 会话侧边栏 */
+  .sidebar { width: 240px; background: var(--nav); color: #fff; display: flex; flex-direction: column; flex-shrink: 0; }
+  .sidebar-head { padding: 14px 12px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid rgba(255,255,255,.12); }
+  .sidebar-head h2 { font-size: 15px; font-weight: 600; }
+  .sidebar-head button { background: var(--blue); border: none; color: #fff; font-size: 13px; padding: 6px 12px; border-radius: 8px; cursor: pointer; }
+  #conv-list { flex: 1; overflow-y: auto; padding: 8px; }
+  .conv-item { padding: 10px 12px; border-radius: 8px; cursor: pointer; margin-bottom: 2px; }
+  .conv-item:hover { background: rgba(255,255,255,.08); }
+  .conv-item.active { background: rgba(47,125,225,.35); }
+  .conv-item .t { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .conv-item .m { font-size: 11px; color: rgba(255,255,255,.55); margin-top: 2px; }
+  .conv-empty { font-size: 12px; color: rgba(255,255,255,.4); padding: 16px 12px; text-align: center; }
+  /* 主区 */
+  .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  header { background: var(--panel); border-bottom: 1px solid var(--line); padding: 12px 20px; display: flex; align-items: center; gap: 12px; }
+  header h1 { font-size: 16px; font-weight: 600; }
+  header .badge { font-size: 12px; padding: 2px 10px; border-radius: 20px; background: #eaf4ee; color: var(--green); }
+  header .status { font-size: 12px; color: var(--muted); margin-left: auto; }
+  #chat { flex: 1; overflow-y: auto; padding: 20px; max-width: 760px; width: 100%; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
+  .msg { max-width: 78%; padding: 10px 14px; border-radius: var(--radius); line-height: 1.6; font-size: 14px; white-space: pre-wrap; word-break: break-word; }
+  .msg.user { align-self: flex-end; background: var(--blue); color: #fff; border-bottom-right-radius: 4px; }
+  .msg.user a { color: #cfe3ff; }
+  .msg.ai { align-self: flex-start; background: var(--panel); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+  .msg.sys { align-self: center; background: #fff8ec; border: 1px solid #f2e3c3; color: #8a6d1f; font-size: 13px; }
+  .msg.error { background: #fdeeee; border-color: #f3c7c7; color: var(--red); }
+  .msg a { color: var(--blue); text-decoration: underline; }
+  .msg code { background: rgba(0,0,0,.05); padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  .meta { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  #toolbar { background: var(--panel); border-top: 1px solid var(--line); padding: 6px 20px; display: flex; gap: 8px; max-width: 800px; width: 100%; margin: 0 auto; flex-wrap: wrap; }
+  #toolbar button { font-size: 12px; padding: 4px 12px; border: 1px solid var(--line); border-radius: 20px; background: #fff; color: var(--muted); cursor: pointer; }
+  #toolbar button:hover { color: var(--blue); border-color: var(--blue); }
+  #input-bar { background: var(--panel); border-top: 1px solid var(--line); padding: 12px 20px; display: flex; gap: 10px; max-width: 800px; width: 100%; margin: 0 auto; }
+  #input { flex: 1; padding: 10px 14px; border: 1px solid var(--line); border-radius: 8px; font-size: 14px; outline: none; }
+  #input:focus { border-color: var(--blue); }
+  #send { padding: 10px 22px; border: none; border-radius: 8px; background: var(--blue); color: #fff; font-size: 14px; cursor: pointer; }
+  #send:disabled { opacity: .5; cursor: not-allowed; }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="sidebar-head">
+      <h2>💬 会话</h2>
+      <button onclick="newConversation()">＋ 新对话</button>
+    </div>
+    <div id="conv-list"><div class="conv-empty">加载中…</div></div>
+  </aside>
+
+  <div class="main">
+    <header>
+      <h1>智能问答</h1>
+      <span class="badge">语义检索 · 转人工 · 工单</span>
+      <span class="status" id="srv-status">…</span>
+    </header>
+
+    <div id="chat"></div>
+
+    <div id="toolbar">
+      <button onclick="promptToken()">🔑 令牌</button>
+      <button onclick="loadTickets()">📋 工单列表</button>
+      <button onclick="sendPreset('员工手册里对工作时间是怎么规定的？')">示例①工作时间</button>
+      <button onclick="sendPreset('我想申请调岗，流程是什么？')">示例②转人工</button>
+      <button onclick="sendPreset('我要投诉，找谁反映？')">示例③投诉</button>
+    </div>
+
+    <div id="input-bar">
+      <input id="input" placeholder="输入问题，回车发送…" autocomplete="off">
+      <button id="send" onclick="send()">发送</button>
+    </div>
+  </div>
+</div>
+
+<div id="tickets" style="display:none; position:fixed; left:260px; right:20px; top:70px; bottom:20px; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px; overflow:auto; z-index:10; font-size:13px;">
+  <div style="display:flex; justify-content:space-between;"><b>工单列表</b><button onclick="document.getElementById('tickets').style.display='none'">✕ 关闭</button></div>
+  <table style="width:100%; border-collapse:collapse; margin-top:10px;">
+    <thead><tr style="color:var(--muted); text-align:left; font-size:12px;"><th style="padding:6px 8px;">#</th><th>会话</th><th>状态</th><th>身份组</th><th>问题</th><th>服务时长</th><th>满意度</th></tr></thead>
+    <tbody id="tickets-body"></tbody>
+  </table>
+</div>
+
+<script>
+const API = '/api';
+const USER = localStorage.getItem('qa-user') || 'web-demo';
+let busy = false;
+let currentSessionId = null;
+// 鉴权令牌（X-Qabot-Token）：所有 /api/* 必须携带，点工具栏「🔑 令牌」填写。
+let TOKEN = localStorage.getItem('qa-token') || '';
+function authHeaders() { return TOKEN ? { 'x-qabot-token': TOKEN } : {}; }
+function promptToken() {
+  const t = prompt('请输入 qabot 访问令牌（X-Qabot-Token）：', TOKEN || '');
+  if (t) { TOKEN = t.trim(); localStorage.setItem('qa-token', TOKEN); }
+  return TOKEN;
+}
+async function api(url, options) {
+  return fetch(url, { ...options, headers: { ...(options && options.headers), ...authHeaders() } });
+}
+
+function renderMd(text) {
+  const esc = String(text).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const links = [];
+  let step = esc.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, (_m, t, u) => {
+    links.push([t, u]);
+    return '@@L' + (links.length - 1) + '@@';
+  });
+  const bare = [];
+  step = step.replace(/(^|[\s（(])(https?:\/\/[^\s<)]+)/g, (m, pre, u) => {
+    bare.push(u);
+    return pre + '@@U' + (bare.length - 1) + '@@';
+  });
+  step = step
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\n/g, '<br>');
+  return step
+    .replace(/@@L(\d+)@@/g, (_m, n) => { const [t, u] = links[+n]; return '<a href="' + u + '" target="_blank" rel="noopener">' + t + '</a>'; })
+    .replace(/@@U(\d+)@@/g, (_m, n) => { const u = bare[+n]; return '<a href="' + u + '" target="_blank" rel="noopener">' + u + '</a>'; });
+}
+
+function addMsg(role, text, meta) {
+  const box = document.getElementById('chat');
+  const el = document.createElement('div');
+  el.className = 'msg ' + role;
+  el.innerHTML = renderMd(text);
+  if (meta) { const m = document.createElement('div'); m.className = 'meta'; m.textContent = meta; el.appendChild(m); }
+  box.appendChild(el);
+  box.scrollTop = box.scrollHeight;
+}
+
+function clearChat() { document.getElementById('chat').innerHTML = ''; }
+
+function fmtTime(ts) {
+  const d = new Date(ts);
+  const pad = n => String(n).padStart(2,'0');
+  return (d.getMonth()+1)+'月'+d.getDate()+'日 '+pad(d.getHours())+':'+pad(d.getMinutes());
+}
+
+async function loadConversations(selectId) {
+  try {
+    const j = await (await api(API + '/conversations?userId=' + encodeURIComponent(USER))).json();
+    const list = j.conversations || [];
+    const box = document.getElementById('conv-list');
+    if (list.length === 0) {
+      box.innerHTML = '<div class="conv-empty">暂无会话，点击「＋ 新对话」开始</div>';
+      return;
+    }
+    box.innerHTML = list.map(c =>
+      '<div class="conv-item' + (c.sessionId === (selectId || currentSessionId) ? ' active' : '') + '" onclick="selectConversation(\'' + c.sessionId + '\')">' +
+      '<div class="t">' + esc(c.title) + '</div>' +
+      '<div class="m">' + fmtTime(c.lastMessageAt) + (c.messageCount>0 ? ' · '+c.messageCount+'条' : '') + '</div></div>'
+    ).join('');
+    if (selectId) selectConversation(selectId);
+  } catch (e) { console.error(e); }
+}
+
+async function selectConversation(sessionId) {
+  currentSessionId = sessionId;
+  clearChat();
+  await loadConversations();
+  try {
+    const j = await (await api(API + '/conversations/' + encodeURIComponent(sessionId) + '/messages')).json();
+    for (const m of j.messages || []) addMsg(m.role === 'user' ? 'user' : 'ai', m.text);
+  } catch (e) { addMsg('error', '加载历史失败：' + e.message); }
+}
+
+async function newConversation() {
+  if (busy) return;
+  try {
+    const res = await api(API + '/conversations/new', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ userId: USER }),
+    });
+    const j = await res.json();
+    if (!res.ok) throw new Error(j.error || ('HTTP ' + res.status));
+    await selectConversation(j.sessionId);
+    addMsg('sys', '已开启新会话。之前的对话仍保留在左侧，可随时切换继续。');
+  } catch (e) { addMsg('error', '开新会话失败：' + e.message); }
+}
+
+async function send() {
+  const input = document.getElementById('input');
+  const text = input.value.trim();
+  if (!text || busy) return;
+  sendText(text);
+}
+
+async function sendText(text) {
+  const input = document.getElementById('input');
+  input.value = '';
+  addMsg('user', text);
+  setBusy(true);
+  try {
+    const res = await api(API + '/chat', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ userId: USER, message: text, sessionId: currentSessionId || undefined }),
+    });
+    const j = await res.json();
+    if (!res.ok) throw new Error(j.error || ('HTTP ' + res.status));
+    if (j.sessionId && !currentSessionId) currentSessionId = j.sessionId;
+    addMsg('ai', j.text || '（空回复）', '工单 #' + j.ticketId + ' · 服务 ' + Math.round((j.serviceMs||0)/1000) + 's');
+    if (j.handoffRequested) addMsg('sys', '🛎️ 已发起转人工，服务人员将收到飞书通知卡片');
+    await loadConversations();
+  } catch (e) {
+    addMsg('error', '出错：' + e.message);
+  } finally { setBusy(false); }
+}
+
+function sendPreset(t) { sendText(t); }
+function setBusy(v) { busy = v; document.getElementById('send').disabled = v; document.getElementById('send').textContent = v ? '思考中…' : '发送'; }
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+async function loadTickets() {
+  const box = document.getElementById('tickets');
+  const body = document.getElementById('tickets-body');
+  if (box.style.display === 'block') { box.style.display = 'none'; return; }
+  try {
+    const list = await (await api(API + '/tickets?limit=20')).json();
+    body.innerHTML = list.length === 0
+      ? '<tr><td colspan="6">暂无工单</td></tr>'
+      : list.map(t => `<tr>
+          <td>#${t.id}</td>
+          <td style="font-size:12px;color:var(--muted);">${esc(t.sessionId||'')}</td>
+          <td>${t.status}</td>
+          <td>${esc(t.department || '-')}</td>
+          <td>${esc((t.question||'').slice(0,24))}</td>
+          <td>${t.serviceStart && t.serviceEnd ? Math.round((t.serviceEnd-t.serviceStart)/1000)+'s' : '-'}</td>
+          <td>${t.satisfaction ?? '-'}</td></tr>`).join('');
+    box.style.display = 'block';
+  } catch (e) { addMsg('error', '拉取工单失败：' + e.message); }
+}
+
+(async function init() {
+  if (!TOKEN) promptToken();
+  try {
+    const h = await (await api(API + '/health')).json();
+    document.getElementById('srv-status').textContent = '服务在线';
+  } catch { document.getElementById('srv-status').textContent = '⚠️ 服务未启动'; }
+  document.getElementById('input').addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
+  await loadConversations();
+  // 默认选最近会话；没有则自动开一个
+  if (!currentSessionId) await newConversation();
+})();
+</script>
+</body>
+</html>

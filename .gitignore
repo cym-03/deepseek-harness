@@ -4,6 +4,8 @@ node_modules/
 lib/
 *.tsbuildinfo
 pnpm-debug.log
+runtime-*.log
+apps/qabot/runtime-*.log
 .pnpm-store/
 .cache/
 examples/*/*.jsonl

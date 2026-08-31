@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-26-qabot-persistent-embedding-index.md
+2026-08-26-qabot-persistent-embedding-index.md: 67c5c3d869d72dfb62ae08fe1c7f18e26cde0c78
+2026-08-26-qabot-persistent-embedding-index.zh.md: 08e3647f71cdc905405827dbcd88afaec9822f53
