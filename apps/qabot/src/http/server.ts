@@ -261,6 +261,7 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     messages: Array<{ role: 'user' | 'assistant' | 'human' | 'system'; text: string; createdAt: number; images?: KbMediaRef[] }>
     ticket: Ticket | null
     handoffRecommended: boolean
+    latestMessageId: number
   }> => {
     const timeline = await loadConversationTimeline(sessionId, qabot, tickets, kb, messages)
     const ticket = await tickets.forSession(sessionId)
@@ -277,6 +278,7 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
       })),
       ticket: ticket ?? null,
       handoffRecommended,
+      latestMessageId: timeline.latestMessageId,
     }
   }
 
@@ -312,7 +314,20 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
 
   route('GET', '/v1/conversations', async (ctx) => {
     const identity = requireEmployee(ctx)
-    return { conversations: await qabot.listConversations(identity.employeeId) }
+    const conversations = await qabot.listConversations(identity.employeeId)
+    const unread = messages === undefined
+      ? new Map<string, number>()
+      : await messages.unreadCounts(
+        conversations.map(conversation => conversation.sessionId),
+        `employee:${identity.employeeId}`,
+        ['assistant', 'human', 'system'],
+      )
+    return {
+      conversations: conversations.map(conversation => ({
+        ...conversation,
+        unreadCount: unread.get(conversation.sessionId) ?? 0,
+      })),
+    }
   })
 
   route('GET', '/v1/conversations/<sessionId>/messages', async (ctx) => {
@@ -321,7 +336,9 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     if (!(await qabot.listConversations(identity.employeeId)).some(item => item.sessionId === sessionId)) {
       throw new Error('CONVERSATION_NOT_FOUND')
     }
-    return await conversationPayload(sessionId)
+    const { latestMessageId, ...payload } = await conversationPayload(sessionId)
+    if (latestMessageId > 0) await messages?.markRead(sessionId, `employee:${identity.employeeId}`, latestMessageId)
+    return payload
   })
 
   route('POST', '/v1/conversations/<sessionId>/end', async (ctx) => {
@@ -370,7 +387,10 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     if (message === '' || message.length > maxMessageLength) throw new Error('MESSAGE_INVALID')
     const sessionId = ctx.params.sessionId ?? ''
     const outcome = await answerConversation(identity.employeeId, message, sessionId)
-    await loadConversationTimeline(sessionId, qabot, tickets, kb, messages)
+    const timeline = await loadConversationTimeline(sessionId, qabot, tickets, kb, messages)
+    if (timeline.latestMessageId > 0) {
+      await messages?.markRead(sessionId, `employee:${identity.employeeId}`, timeline.latestMessageId)
+    }
     publishTicketChange(await tickets.forSession(sessionId))
     return outcome
   })
@@ -392,7 +412,10 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     event('started', { sessionId })
     try {
       const outcome = await answerConversation(identity.employeeId, message, sessionId)
-      await loadConversationTimeline(sessionId, qabot, tickets, kb, messages)
+      const timeline = await loadConversationTimeline(sessionId, qabot, tickets, kb, messages)
+      if (timeline.latestMessageId > 0) {
+        await messages?.markRead(sessionId, `employee:${identity.employeeId}`, timeline.latestMessageId)
+      }
       publishTicketChange(await tickets.forSession(sessionId))
       if (typeof outcome.text === 'string' && outcome.text !== '') event('text-delta', { text: outcome.text })
       if (Array.isArray(outcome.images)) {
@@ -452,12 +475,25 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
       ? await tickets.list({ limit })
       : (await Promise.all(identity.departmentIds.map(async group => await tickets.listByGroup(group, limit)))).flat()
     const unique = [...new Map(visible.map(ticket => [ticket.id, ticket])).values()]
-    return { tickets: unique.sort((left, right) => right.id - left.id).slice(0, limit) }
+    const selected = unique.sort((left, right) => right.id - left.id).slice(0, limit)
+    const unread = messages === undefined
+      ? new Map<string, number>()
+      : await messages.unreadCounts(
+        selected.map(ticket => ticket.sessionId),
+        `agent:${identity.employeeId}`,
+        ['user'],
+      )
+    return {
+      tickets: selected.map(ticket => ({ ...ticket, unreadCount: unread.get(ticket.sessionId) ?? 0 })),
+    }
   })
 
   route('GET', '/v1/agent/tickets/<id>', async (ctx) => {
-    const { ticket } = await requireTicketAccess(ctx, Number(ctx.params.id))
+    const { identity, ticket } = await requireTicketAccess(ctx, Number(ctx.params.id))
     const timeline = await conversationPayload(ticket.sessionId)
+    if (timeline.latestMessageId > 0) {
+      await messages?.markRead(ticket.sessionId, `agent:${identity.employeeId}`, timeline.latestMessageId)
+    }
     return {
       ticket,
       transcript: await qabot.transcript(ticket.sessionId),
@@ -846,7 +882,8 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
   // 某会话的历史消息（前端切换会话时加载）。合并人工回复。
   route('GET', '/api/conversations/<sessionId>/messages', async (ctx) => {
     const sessionId = ctx.params.sessionId ?? ''
-    return await conversationPayload(sessionId)
+    const { latestMessageId: _latestMessageId, ...payload } = await conversationPayload(sessionId)
+    return payload
   })
 
   route('GET', '/api/kb/assets/<id>', async (ctx) => {

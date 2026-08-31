@@ -16,6 +16,7 @@ export interface ConversationTimelineMessage {
 export interface ConversationTimeline {
   events: readonly SessionEvent[]
   messages: ConversationTimelineMessage[]
+  latestMessageId: number
 }
 
 function sessionEventProjection(
@@ -89,19 +90,27 @@ export async function loadConversationTimeline(
   }
   projected.sort((left, right) => left.createdAt - right.createdAt || left.sourceOrder - right.sourceOrder)
   if (repository === undefined) {
-    return { events, messages: projected.map(({ role, text, createdAt, images }) => ({
+    return {
+      events,
+      messages: projected.map(({ role, text, createdAt, images }) => ({
+        role,
+        text,
+        createdAt,
+        ...(images === undefined ? {} : { images }),
+      })),
+      latestMessageId: 0,
+    }
+  }
+  await repository.upsert(projected)
+  const stored = await repository.list(sessionId)
+  return {
+    events,
+    messages: stored.map(({ role, text, createdAt, images }) => ({
       role,
       text,
       createdAt,
       ...(images === undefined ? {} : { images }),
-    })) }
+    })),
+    latestMessageId: stored.reduce((latest, message) => Math.max(latest, message.id), 0),
   }
-  await repository.upsert(projected)
-  const stored = await repository.list(sessionId)
-  return { events, messages: stored.map(({ role, text, createdAt, images }) => ({
-    role,
-    text,
-    createdAt,
-    ...(images === undefined ? {} : { images }),
-  })) }
 }

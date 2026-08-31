@@ -43,6 +43,13 @@ describeMysql('MySQL Repository integration', () => {
         expect.objectContaining({ sessionId, role: 'user', text: '测试消息已更新' }),
       ])
       expect(await messages.count(sessionId)).toBe(1)
+      expect(await messages.unreadCounts([sessionId], 'agent:test', ['user'])).toEqual(new Map([[sessionId, 1]]))
+      await messages.markRead(sessionId, 'agent:test', (await messages.list(sessionId)).at(-1)?.id ?? 0)
+      await messages.upsert([{ sessionId, sourceType: 'dsh_event', sourceId: '2', sourceOrder: 2,
+        role: 'user', text: '未读测试消息', createdAt: 200 }])
+      expect(await messages.unreadCounts([sessionId], 'agent:test', ['user'])).toEqual(new Map([[sessionId, 1]]))
+      await messages.markRead(sessionId, 'agent:test', (await messages.list(sessionId)).at(-1)?.id ?? 0)
+      expect(await messages.unreadCounts([sessionId], 'agent:test', ['user'])).toEqual(new Map())
 
       const audit = new MysqlAuditRepository(pool)
       expect(await audit.append({ actorId: userKey, action: 'test.action', resourceType: 'test', resourceId: suffix, detail: null }))
@@ -66,6 +73,7 @@ describeMysql('MySQL Repository integration', () => {
       expect(claimed).toBeDefined()
       if (claimed !== undefined) await outbox.complete(claimed.id)
     } finally {
+      await pool.execute('DELETE FROM conversation_message_reads WHERE session_id = ?', [sessionId])
       await pool.execute('DELETE FROM conversation_messages WHERE session_id = ?', [sessionId])
       await pool.execute('DELETE FROM outbox_messages WHERE idempotency_key = ?', [outboxKey])
       await pool.execute('DELETE FROM audit_records WHERE actor_id = ?', [userKey])

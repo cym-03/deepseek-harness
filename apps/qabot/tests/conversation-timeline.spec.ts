@@ -12,6 +12,7 @@ import type { Qabot } from '../src/runner.ts'
 
 class MemoryMessageRepository implements ConversationMessageRepository {
   private readonly messages = new Map<string, ConversationMessage>()
+  private readonly reads = new Map<string, number>()
   private nextId = 1
 
   upsert(messages: readonly ConversationMessageProjection[]): void {
@@ -30,6 +31,23 @@ class MemoryMessageRepository implements ConversationMessageRepository {
 
   count(sessionId?: string): number {
     return sessionId === undefined ? this.messages.size : this.list(sessionId).length
+  }
+
+  markRead(sessionId: string, readerKey: string, throughMessageId: number): void {
+    const previous = this.reads.get(`${sessionId}:${readerKey}`) ?? 0
+    this.reads.set(`${sessionId}:${readerKey}`, Math.max(previous, throughMessageId))
+  }
+
+  unreadCounts(
+    sessionIds: readonly string[],
+    readerKey: string,
+    roles: readonly ConversationMessage['role'][],
+  ): Map<string, number> {
+    return new Map(sessionIds.map((sessionId) => {
+      const lastRead = this.reads.get(`${sessionId}:${readerKey}`) ?? 0
+      const count = this.list(sessionId).filter(message => message.id > lastRead && roles.includes(message.role)).length
+      return [sessionId, count]
+    }))
   }
 }
 
@@ -54,5 +72,18 @@ describe('conversation timeline projection', () => {
       expect.objectContaining({ role: 'assistant', text: '请在飞书提交申请' }),
     ])
     expect(repository.count('session-1')).toBe(2)
+  })
+
+  it('does not mark a message that arrived after the returned timeline as read', async () => {
+    const repository = new MemoryMessageRepository()
+    repository.upsert([{ sessionId: 'session-1', sourceType: 'dsh_event', sourceId: '1', sourceOrder: 1,
+      role: 'assistant', text: '已展示回复', createdAt: 100 }])
+    const returnedMessageId = repository.list('session-1')[0]?.id ?? 0
+    repository.upsert([{ sessionId: 'session-1', sourceType: 'ticket_reply', sourceId: '2', sourceOrder: 2,
+      role: 'human', text: '稍后到达的人工回复', createdAt: 200 }])
+    repository.markRead('session-1', 'employee:test', returnedMessageId)
+
+    expect(repository.unreadCounts(['session-1'], 'employee:test', ['assistant', 'human']))
+      .toEqual(new Map([['session-1', 1]]))
   })
 })

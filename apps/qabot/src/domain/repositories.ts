@@ -38,6 +38,25 @@ export interface ConversationMessageRepository {
   upsert(messages: readonly ConversationMessageProjection[]): Awaitable<void>
   list(sessionId: string): Awaitable<ConversationMessage[]>
   count(sessionId?: string): Awaitable<number>
+  /**
+   * Advances one reader through a message included in the returned timeline without moving backward.
+   * @param sessionId - Conversation whose visible timeline was opened.
+   * @param readerKey - Role-scoped employee identifier such as `employee:<id>` or `agent:<id>`.
+   * @param throughMessageId - Greatest projected message id included in that timeline response.
+   */
+  markRead(sessionId: string, readerKey: string, throughMessageId: number): Awaitable<void>
+  /**
+   * Counts messages after each reader position, restricted to roles that represent incoming messages.
+   * @param sessionIds - Conversations visible to the reader.
+   * @param readerKey - Role-scoped employee identifier.
+   * @param roles - Incoming message roles for the employee or service-desk view.
+   * @returns Unread counts keyed by session; sessions without unread messages are absent.
+   */
+  unreadCounts(
+    sessionIds: readonly string[],
+    readerKey: string,
+    roles: readonly ConversationMessageRole[],
+  ): Awaitable<Map<string, number>>
 }
 
 export interface TicketRepository {

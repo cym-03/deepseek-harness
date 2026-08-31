@@ -184,6 +184,38 @@ export class MysqlConversationMessageRepository implements ConversationMessageRe
       )
     return rows[0]?.count ?? 0
   }
+
+  async markRead(sessionId: string, readerKey: string, throughMessageId: number): Promise<void> {
+    await this.pool.execute(`
+      INSERT INTO conversation_message_reads (session_id, reader_key, last_read_message_id, updated_at)
+      VALUES (?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+        last_read_message_id = GREATEST(last_read_message_id, VALUES(last_read_message_id)),
+        updated_at = VALUES(updated_at)
+    `, [sessionId, readerKey, throughMessageId, Date.now()])
+  }
+
+  async unreadCounts(
+    sessionIds: readonly string[],
+    readerKey: string,
+    roles: readonly ConversationMessage['role'][],
+  ): Promise<Map<string, number>> {
+    if (sessionIds.length === 0 || roles.length === 0) return new Map()
+    const sessionPlaceholders = sessionIds.map(() => '?').join(', ')
+    const rolePlaceholders = roles.map(() => '?').join(', ')
+    const [rows] = await this.pool.execute<Array<RowDataPacket & { session_id: string; unread_count: number }>>(`
+      SELECT messages.session_id, COUNT(*) AS unread_count
+      FROM conversation_messages AS messages
+      CROSS JOIN conversation_message_read_baselines AS baseline
+      LEFT JOIN conversation_message_reads AS reader_progress
+        ON reader_progress.session_id = messages.session_id AND reader_progress.reader_key = ?
+      WHERE messages.session_id IN (${sessionPlaceholders})
+        AND messages.role IN (${rolePlaceholders})
+        AND messages.id > COALESCE(reader_progress.last_read_message_id, baseline.last_message_id)
+      GROUP BY messages.session_id
+    `, [readerKey, ...sessionIds, ...roles])
+    return new Map(rows.map(row => [row.session_id, Number(row.unread_count)]))
+  }
 }
 
 interface AuditRow extends RowDataPacket {

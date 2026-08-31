@@ -157,6 +157,8 @@ MySQL 后端提供完整的 Conversation、Ticket、Audit 和 Outbox Repository�
 
 员工、智能助手与人工客服公开消息使用稳定来源标识投影到 MySQL `conversation_messages`。DSH 会话事件继续保存模型可见历史，门户时间线则读取持久业务投影，并且不会因某次会话文件读取为空而删除已存消息。已有会话可执行一次 `pnpm --filter @deepseek-ai/dsh-qabot run db:project-messages` 完成回填；该命令具备幂等性，不会调用语言模型或向量模型。
 
+MySQL `conversation_message_reads` 分别保存员工端和客服端的已读位置。会话列表返回按角色过滤的 `unreadCount`，读取有权访问的会话详情只推进当前查看者的已读位置。迁移 `009_conversation_message_reads.sql` 将已有消息记录为功能启用基线，因此只有后续回复开始参与未读计数。
+
 飞书转人工通知先写入 Outbox，再发送给所选服务组的全部已启用人员。后台任务按指数退避重试，最多八次；相同幂等键只创建一个通知任务。工单状态已变化的旧转人工通知会直接完成而不发送，避免转派后再通知旧队列。
 
 满意度在员工门户聊天界面完成，不通过飞书卡片。工单处于 `resolved` 或 `closed` 时，所属员工可提交一次 1-5 分评价；请求必须携带工单最新 `version`，重复评价或版本冲突返回 HTTP 409。工单不存储服务评论字段。

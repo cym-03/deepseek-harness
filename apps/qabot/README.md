@@ -157,6 +157,8 @@ The MySQL provider implements Conversation, Ticket, Audit, and Outbox repositori
 
 Employee, assistant, and public service-desk messages are projected into MySQL `conversation_messages` with stable source identifiers. DSH session events remain the model-visible history, while portal timeline reads use the durable business projection and never delete stored messages after an empty session-file read. Run `pnpm --filter @deepseek-ai/dsh-qabot run db:project-messages` once to backfill existing conversations; the command is idempotent and does not invoke language or embedding models.
 
+MySQL `conversation_message_reads` stores independent employee and service-desk read positions. Conversation lists expose role-filtered `unreadCount` values, and an authorized detail read advances only that viewer's position. Migration `009_conversation_message_reads.sql` records existing messages as the rollout baseline so only later replies begin unread accounting.
+
 Feishu handoff notifications first enter the Outbox and fan out to every active member of the selected service group. Delivery retries with exponential backoff up to eight times, and one idempotency key creates only one notification job. A stale handoff notification completes without sending when the ticket state has already changed.
 
 Employees submit satisfaction scores in the portal conversation rather than Feishu. An employee can rate an owned `resolved` or `closed` ticket once with a score from 1 to 5 and the latest ticket `version`. Duplicate scores and version conflicts return HTTP 409. Tickets do not store a service-comment field.
