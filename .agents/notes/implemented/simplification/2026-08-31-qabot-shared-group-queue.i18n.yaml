@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/simplification/2026-08-31-qabot-shared-group-queue.md
-2026-08-31-qabot-shared-group-queue.md: 4ce645f96eeaebd04348a52d49b0282614dfb149
-2026-08-31-qabot-shared-group-queue.zh.md: b50b5b0ad66e44c4d26196427fff6a047e109493
+2026-08-31-qabot-shared-group-queue.md: 1bda5c7567097a527179f500034291d759328dd3
+2026-08-31-qabot-shared-group-queue.zh.md: ae0002594c86c57cdbc33c42e5d34055235be9b9

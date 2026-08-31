@@ -14,7 +14,7 @@ Human handoff routes a ticket to a service group without a priority, SLA deadlin
 
 Agent-initiated transfer remains different from an employee handoff: the agent selects both the destination group and a specific destination member because an active owner is deliberately relinquishing responsibility.
 
-MySQL migration 006 removes the priority and SLA projection introduced by migration 005 and drops the service-policy table. The portal removes the separate configuration tab and presents audit records inside operations analysis. Audit records continue to cover ticket, knowledge, and staff mutations; there is no priority mutation to record.
+MySQL migration 006 removes the priority and SLA projection introduced by migration 005 and drops the service-policy table. Migration 007 clears assignees from legacy `waiting_agent` tickets so the shared queue applies immediately without changing tickets already in service. The portal removes the separate configuration tab and presents audit records inside operations analysis. Audit records continue to cover ticket, knowledge, and staff mutations; there is no priority mutation to record.
 
 ## Alternatives considered
 
