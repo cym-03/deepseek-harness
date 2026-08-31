@@ -8,7 +8,6 @@ import {
   MysqlOutboxRepository,
   MysqlTicketRepository,
 } from '../src/database/mysql-repositories.ts'
-import { MysqlServicePolicyStore } from '../src/database/mysql-service-policies.ts'
 
 const databaseUrl = process.env.QABOT_TEST_MYSQL_URL
 const describeMysql = databaseUrl === undefined ? describe.skip : describe
@@ -21,7 +20,6 @@ describeMysql('MySQL Repository integration', () => {
     const userKey = `test-user-${suffix}`
     const sessionId = `test-session-${suffix}`
     const outboxKey = `test-outbox-${suffix}`
-    const policyGroup = `test-group-${suffix}`
     try {
       const directory = fileURLToPath(new URL('../migrations/mysql', import.meta.url))
       await migrateMysql(pool, await loadMysqlMigrations(directory))
@@ -38,28 +36,14 @@ describeMysql('MySQL Repository integration', () => {
 
       const tickets = new MysqlTicketRepository(pool)
       const ticket = await tickets.ensureOpen({ sessionId, userKey, question: '需要人工帮助' })
-      const policies = new MysqlServicePolicyStore(pool)
-      await policies.upsert({
-        groupKey: policyGroup,
-        displayName: '测试服务组',
-        defaultPriority: 'high',
-        firstResponseMinutes: 15,
-        resolutionMinutes: 120,
-        enabled: true,
-      })
-      await tickets.markHandoff(sessionId, '需要人工', policyGroup)
-      expect(await policies.applyToTicket(ticket.id, policyGroup)).toBe(true)
+      await tickets.markHandoff(sessionId, '需要人工', 'IT')
       const waiting = await tickets.get(ticket.id)
       if (waiting === undefined) throw new Error('expected waiting ticket')
-      expect(waiting).toMatchObject({ priority: 'high' })
-      expect(waiting.firstResponseDueAt).toBeTypeOf('number')
-      expect(waiting.resolutionDueAt).toBeTypeOf('number')
       expect(await tickets.accept(ticket.id, 'agent-1', waiting.version)).toBe(true)
       expect(await tickets.accept(ticket.id, 'agent-2', waiting.version)).toBe(false)
       const accepted = await tickets.get(ticket.id)
       if (accepted === undefined) throw new Error('expected accepted ticket')
       expect(await tickets.reply(ticket.id, '已处理', accepted.version)).toBeTypeOf('number')
-      expect((await tickets.get(ticket.id))?.firstAgentResponseAt).toBeTypeOf('number')
 
       const outbox = new MysqlOutboxRepository(pool)
       expect(await outbox.enqueue(outboxKey, 'ticket.handoff', { ticketId: ticket.id })).toBe(true)
@@ -73,7 +57,6 @@ describeMysql('MySQL Repository integration', () => {
       await pool.execute('DELETE FROM ticket_replies WHERE ticket_id IN (SELECT id FROM tickets WHERE user_key = ?)', [userKey])
       await pool.execute('DELETE FROM tickets WHERE user_key = ?', [userKey])
       await pool.execute('DELETE FROM conversations WHERE user_key = ?', [userKey])
-      await pool.execute('DELETE FROM service_group_policies WHERE group_key = ?', [policyGroup])
       await pool.end()
     }
   }, 30_000)

@@ -34,8 +34,6 @@ import { buildWeeklyReport } from '../report/weekly.ts'
 import { hasRole, verifyPortalIdentity, type PortalIdentity } from '../security/identity.ts'
 import { canAccessTicket, isServiceDeskUser } from '../security/authorization.ts'
 import type { AuditRepository, OutboxRepository, TicketRepository } from '../domain/repositories.ts'
-import type { ServicePolicyRepository } from '../database/mysql-service-policies.ts'
-import type { TicketPriority } from '../ticket/store.ts'
 
 const PUBLIC_DIR = join(fileURLToPath(new URL('.', import.meta.url)), 'public')
 
@@ -87,13 +85,12 @@ export interface QabotHttpOptions {
   syncFeishu?: () => Promise<{ synced: number; failed: number; errors: string[] }>
   /** Persists the current knowledge index without invoking embedding providers. */
   projectKnowledge?: () => Promise<void>
-  servicePolicies?: ServicePolicyRepository
   audit: AuditRepository
   outbox: OutboxRepository
 }
 
 export async function startHttpServer(options: QabotHttpOptions): Promise<ReturnType<typeof createServer>> {
-  const { qabot, tickets, kb, staff, audit, outbox, sources, syncFeishu, projectKnowledge, servicePolicies } = options
+  const { qabot, tickets, kb, staff, audit, outbox, sources, syncFeishu, projectKnowledge } = options
   const token = process.env.QABOT_API_TOKEN
   if (token === undefined || token.trim() === '') {
     throw new Error('必须配置 QABOT_API_TOKEN（所有环境强制）。未配置时拒绝启动，防止内网机器绕过门户直接调用本服务；apps/qabot/start-qabot.bat 已内置默认令牌。')
@@ -388,18 +385,7 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     if (ticket === undefined) throw new Error('TICKET_NOT_FOUND')
     const serviceGroup = group === '其他' ? 'default' : group
     await tickets.markHandoff(sessionId, ticket.handoffReason ?? '员工选择转人工', serviceGroup)
-    let current = await tickets.forSession(sessionId)
-    if (current !== undefined) {
-      const assigned = staff.assignmentTarget(serviceGroup, current.id)
-      if (assigned !== undefined) {
-        await tickets.assign(current.id, assigned.name ?? assigned.openId, serviceGroup)
-        current = await tickets.forSession(sessionId)
-      }
-    }
-    if (current !== undefined && servicePolicies !== undefined) {
-      await servicePolicies.applyToTicket(current.id, serviceGroup)
-      current = await tickets.forSession(sessionId)
-    }
+    const current = await tickets.forSession(sessionId)
     if (current !== undefined) {
       await outbox.enqueue(`ticket:${current.id}:handoff:${current.version}`, 'ticket.handoff', {
         ticketId: current.id,
@@ -564,7 +550,6 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     if (version === null) throw new Error('VERSION_REQUIRED')
     if (!await tickets.transfer(id, toGroup, typeof body.note === 'string' ? body.note : null, version)) throw new Error('TICKET_CONFLICT')
     await tickets.assign(id, target.name ?? target.openId, toGroup)
-    await servicePolicies?.applyToTicket(id, toGroup)
     const ticket = await tickets.get(id)
     if (ticket !== undefined) {
       await outbox.enqueue(`ticket:${id}:handoff:${ticket.version}`, 'ticket.handoff', { ticketId: id, ticketVersion: ticket.version })
@@ -587,75 +572,6 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     const closed = await tickets.get(id)
     publishTicketChange(closed)
     return { ticket: closed }
-  })
-
-  route('POST', '/v1/agent/tickets/<id>/priority', async (ctx) => {
-    const id = Number(ctx.params.id)
-    const { identity } = await requireTicketAccess(ctx, id)
-    if (servicePolicies === undefined) throw new Error('SERVICE_POLICY_UNAVAILABLE')
-    const body = ctx.json as { priority?: unknown; version?: unknown }
-    const priorities: TicketPriority[] = ['low', 'normal', 'high', 'urgent']
-    const priority = typeof body.priority === 'string' && priorities.includes(body.priority as TicketPriority)
-      ? body.priority as TicketPriority
-      : null
-    const version = typeof body.version === 'number' && Number.isInteger(body.version) ? body.version : null
-    if (priority === null || version === null) throw new Error('SERVICE_POLICY_INVALID')
-    if (!await servicePolicies.setTicketPriority(id, priority, version)) throw new Error('TICKET_CONFLICT')
-    const ticket = await tickets.get(id)
-    await audit.append({
-      actorId: identity.employeeId,
-      action: 'ticket.priority.update',
-      resourceType: 'ticket',
-      resourceId: String(id),
-      detail: JSON.stringify({ priority }),
-    })
-    publishTicketChange(ticket)
-    return { ticket }
-  })
-
-  route('GET', '/v1/system/service-policies', async (ctx) => {
-    requireSystemAdmin(ctx)
-    if (servicePolicies === undefined) throw new Error('SERVICE_POLICY_UNAVAILABLE')
-    return { policies: await servicePolicies.list() }
-  })
-
-  route('POST', '/v1/system/service-policies/<group>', async (ctx) => {
-    const identity = requireSystemAdmin(ctx)
-    if (servicePolicies === undefined) throw new Error('SERVICE_POLICY_UNAVAILABLE')
-    const body = ctx.json as {
-      displayName?: unknown
-      defaultPriority?: unknown
-      firstResponseMinutes?: unknown
-      resolutionMinutes?: unknown
-      enabled?: unknown
-    }
-    const priorities: TicketPriority[] = ['low', 'normal', 'high', 'urgent']
-    const defaultPriority = typeof body.defaultPriority === 'string'
-      && priorities.includes(body.defaultPriority as TicketPriority)
-      ? body.defaultPriority as TicketPriority
-      : null
-    const firstResponseMinutes = Number(body.firstResponseMinutes)
-    const resolutionMinutes = Number(body.resolutionMinutes)
-    if (typeof body.displayName !== 'string' || body.displayName.trim() === '' || defaultPriority === null
-      || !Number.isInteger(firstResponseMinutes) || firstResponseMinutes <= 0
-      || !Number.isInteger(resolutionMinutes) || resolutionMinutes < firstResponseMinutes
-      || typeof body.enabled !== 'boolean') throw new Error('SERVICE_POLICY_INVALID')
-    const policy = await servicePolicies.upsert({
-      groupKey: ctx.params.group ?? '',
-      displayName: body.displayName.trim(),
-      defaultPriority,
-      firstResponseMinutes,
-      resolutionMinutes,
-      enabled: body.enabled,
-    })
-    await audit.append({
-      actorId: identity.employeeId,
-      action: 'service-policy.upsert',
-      resourceType: 'service-policy',
-      resourceId: policy.groupKey,
-      detail: JSON.stringify(policy),
-    })
-    return { policy }
   })
 
   route('GET', '/v1/agent/staff', async (ctx) => {
@@ -891,14 +807,7 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     }
     const serviceGroup = group === '其他' ? 'default' : group
     await tickets.markHandoff(sessionId, ticket.handoffReason ?? '员工选择转人工', serviceGroup)
-    let current = await tickets.forSession(sessionId)
-    if (current !== undefined) {
-      const target = staff.assignmentTarget(serviceGroup, current.id)
-      if (target !== undefined) {
-        await tickets.assign(current.id, target.name ?? target.openId, serviceGroup)
-        current = await tickets.forSession(sessionId)
-      }
-    }
+    const current = await tickets.forSession(sessionId)
     if (current !== undefined) {
       await outbox.enqueue(`ticket:${current.id}:handoff:${current.version}`, 'ticket.handoff', {
         ticketId: current.id, ticketVersion: current.version,
@@ -1504,14 +1413,6 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
         }
         if (msg === 'KNOWLEDGE_SYNC_UNAVAILABLE') {
           send(res, 503, { code: msg, message: '知识同步服务未配置' })
-          return
-        }
-        if (msg === 'SERVICE_POLICY_UNAVAILABLE') {
-          send(res, 503, { code: msg, message: '服务组SLA配置仅在MySQL业务后端启用' })
-          return
-        }
-        if (msg === 'SERVICE_POLICY_INVALID') {
-          send(res, 400, { code: msg, message: '优先级或SLA配置无效' })
           return
         }
         // 中转网关余额不足 / 流被掐断 → 给出明确提示而非生硬错误。

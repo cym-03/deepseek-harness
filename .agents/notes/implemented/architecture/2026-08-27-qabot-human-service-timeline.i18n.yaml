@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-27-qabot-human-service-timeline.md
-2026-08-27-qabot-human-service-timeline.md: f419b05e371bf872eebb6f8d559031d087ff70e8
-2026-08-27-qabot-human-service-timeline.zh.md: 402ed0513d1d0a73b0e203c5c6962e370e557ad2
+2026-08-27-qabot-human-service-timeline.md: 3bacee7fdee66a311759d8ae4096bc4bc27815cc
+2026-08-27-qabot-human-service-timeline.zh.md: b1b6b73db85e35af7b3b3dde426e5afd1c8b1c1f

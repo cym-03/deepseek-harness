@@ -232,7 +232,6 @@ async function cmdServe(): Promise<void> {
     staff,
     audit,
     outbox,
-    ...repositories.servicePolicies !== undefined ? { servicePolicies: repositories.servicePolicies } : {},
     ...projectKnowledge !== undefined ? { projectKnowledge } : {},
     ...syncFeishu !== undefined ? { sources: kbSources, syncFeishu } : {},
   })

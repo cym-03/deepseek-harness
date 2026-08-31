@@ -21,7 +21,7 @@ The ticket database uses SQLite `user_version` as a monotonic migration counter.
 - **Last write wins:** rejected because assignment and customer-visible replies are business actions whose conflicts require an operator decision.
 - **Compare timestamps:** rejected because timestamp resolution and clock semantics do not express which stored revision the caller read.
 - **Lock a ticket while an agent page is open:** rejected because browser locks become stale and prevent useful reads; optimistic comparison limits coordination to mutations.
-- **Keep `handoff` as the permanent status:** rejected because it describes an event, while `waiting_agent` describes the queue state used by routing and SLA rules.
+- **Keep `handoff` as the permanent status:** rejected because it describes an event, while `waiting_agent` describes the shared group queue used by routing and visibility rules.
 
 ## Consequences
 

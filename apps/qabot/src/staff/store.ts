@@ -91,26 +91,13 @@ export class StaffStore {
     return fromDb.map(row => ({ openId: row.open_id, group: row.group, name: row.name, active: row.active === 1 }))
   }
 
-  /** 某身份组可通知的 open_id；组为空时回退 default 组。 */
+  /** 某身份组可通知的全部 open_id；不跨组回退。 */
   notifyTargets(group?: string): string[] {
     const members = this.list().filter(m => m.active)
     if (group !== undefined) {
-      const inGroup = members.filter(m => m.group === group)
-      if (inGroup.length > 0) return inGroup.map(m => m.openId)
-      return members.filter(m => m.group === 'default').map(m => m.openId)
+      return members.filter(m => m.group === group).map(m => m.openId)
     }
     return members.map(m => m.openId)
-  }
-
-  /** Selects one active assignee from the requested service group. */
-  assignmentTarget(group: string, seed: number, excludeAssignee?: string): StaffMember | undefined {
-    const grouped = this.list().filter(member => member.active && member.group === group)
-    const alternatives = excludeAssignee === undefined
-      ? grouped
-      : grouped.filter(member => member.name !== excludeAssignee && member.openId !== excludeAssignee)
-    const candidates = alternatives.length > 0 ? alternatives : grouped
-    if (candidates.length === 0) return undefined
-    return candidates[Math.abs(seed) % candidates.length]
   }
 
   /** 所有已配置的分组名。 */

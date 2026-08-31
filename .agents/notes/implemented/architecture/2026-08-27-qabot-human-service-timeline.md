@@ -10,7 +10,7 @@ Automatic group selection made a handoff notification precede the employee's ser
 
 ## Decision
 
-The agent proposes the portal's handoff action without selecting or notifying a service group. The durable session tool event keeps the AI ticket open and expands the portal's single-choice service card; loading that conversation restores the card until the employee chooses or dismisses it. The employee selects HR, Administration, IT, Finance, or Other. Other maps to the general-service group. Only this selection writes the handoff reason, moves the ticket to `waiting_agent`, assigns one active member from that group by a stable ticket-id distribution, and emits the idempotent staff notification. A group without an active member leaves the ticket unassigned for manager handling.
+The agent proposes the portal's handoff action without selecting or notifying a service group. The durable session tool event keeps the AI ticket open and expands the portal's single-choice service card; loading that conversation restores the card until the employee chooses or dismisses it. The employee selects HR, Administration, IT, Finance, or Other. Other maps to the general-service group. Only this selection writes the handoff reason, moves the ticket to `waiting_agent`, and emits one idempotent notification job that fans out to every active member of the selected group. The ticket has no assignee until one notified member accepts it. A group without an active member leaves the ticket unassigned for manager handling.
 
 While a ticket has human-service ownership, employee messages enter the ticket timeline repository and model context. Qabot first checks retrieval relevance: a reliable knowledge hit permits one AI answer, while a miss starts no model turn and leaves the response to staff. Human replies enter the same business timeline and model context but reach the employee only through the portal timeline.
 
@@ -24,7 +24,7 @@ The staff JSON file is a one-time bootstrap source. The staff database is author
 
 **Let the model select the service group.** This removes one employee click but can misroute a ticket and sends a notification before the employee confirms the handoff.
 
-**Require staff to claim every routed ticket.** This avoids automatic ownership but adds queue latency when the selected group already has configured staff.
+**Assign one group member automatically.** Rejected because a small service group can coordinate ownership directly, while automatic assignment can name an unavailable member and hide the ticket from peers who could take it.
 
 **Continue model turns during human service.** This can answer known questions, but interleaves AI and staff ownership in one unresolved service interaction. A new conversation provides an explicit route back to AI service.
 
@@ -32,4 +32,4 @@ The staff JSON file is a one-time bootstrap source. The staff database is author
 
 ## Consequences
 
-The portal becomes the employee's only human-service conversation interface, while Feishu remains a staff notification channel. Routed tickets appear immediately in one configured staff member's queue; assignment is deterministic rather than workload-aware, and groups without active staff require manager handling. Active human-service tickets receive AI answers only for knowledge-backed questions. Employee and staff messages persist before their HTTP requests complete, and restarting Qabot preserves the complete timeline. Cross-store timestamps provide a unified display order; clock precision remains the ordering limit, with persisted ids resolving ties. Unread state is browser-local rather than shared across devices. Staff-file changes after the initial import require an explicit database update.
+The portal becomes the employee's only human-service conversation interface, while Feishu remains a staff notification channel. Routed tickets appear in the selected group's shared queue and every active group member receives the notification. The first successful optimistic accept owns the ticket; other members then see the assigned owner. Groups without active staff require manager handling. Active human-service tickets receive AI answers only for knowledge-backed questions. Employee and staff messages persist before their HTTP requests complete, and restarting Qabot preserves the complete timeline. Cross-store timestamps provide a unified display order; clock precision remains the ordering limit, with persisted ids resolving ties. Unread state is browser-local rather than shared across devices. Staff-file changes after the initial import require an explicit database update.

@@ -48,11 +48,8 @@ DEEPSEEK_BASE_URL=http://<relay>/v1 pnpm --filter @deepseek-ai/dsh-qabot run dev
 | `GET /v1/agent/tickets/:id` | 有权访问的工单详情和人工回复 |
 | `POST /v1/agent/tickets/:id/accept` | 使用签名身份中的 `employeeId` 接单，提交 `{ version }` |
 | `POST /v1/agent/tickets/:id/reply` | 提交 `{ message, version }`，追加公开回复并进入 `waiting_employee` |
-| `POST /v1/agent/tickets/:id/priority` | 使用乐观并发提交 `{ priority, version }` 修改优先级 |
 | `POST /v1/knowledge/versions/:id/publish` | 发布已审核版本，可提交 `{ effectiveAt, expiresAt }` |
 | `POST /v1/knowledge/:source/publication` | 设置 `{ online }`，不删除版本或向量 |
-| `GET /v1/system/service-policies` | SystemAdmin 查询服务组优先级与 SLA 策略 |
-| `POST /v1/system/service-policies/:group` | SystemAdmin 更新一个服务组策略 |
 | `GET /v1/system/audit` | SystemAdmin 查询特权操作审计记录 |
 
 ## HTTP 接口
@@ -125,9 +122,7 @@ DEEPSEEK_BASE_URL=http://<relay>/v1 node --import tsx/esm apps/qabot/src/bin.ts 
 | `QABOT_DATABASE_BACKEND` | sqlite | 业务数据后端；可选 `sqlite`、`mysql` 或 `postgres` |
 | `QABOT_MYSQL_URL` | 无 | MySQL 连接 URL；MySQL 后端必填 |
 
-工单后台统一显示待处理、待接单、处理中和已完成。纯智能工单处于待处理，仅主管可见；超过空闲时限后自动进入已完成。转人工工单进入待接单，接单后进入处理中，结束服务后进入已完成。客服转接必须选择目标服务组及该组具体人员。
-
-MySQL 服务组策略为新转人工或转接的工单设置默认优先级、首次响应截止时间和解决截止时间。首次公开人工回复会记录首次响应时间。主管可在门户修改服务组策略和单张工单优先级，两类操作都写入审计日志。截止时间按自然经过分钟计算，不使用工作时间日历。
+工单后台统一显示待处理、待接单、处理中和已完成。纯智能工单处于待处理，仅主管可见；超过空闲时限后自动进入已完成。转人工工单进入所选服务组的共享待接单队列，不预设处理人，并通知该组全部已启用服务人员；第一位接单人取得工单。后续客服转接仍须选择目标服务组及该组具体人员。
 
 工单响应包含单调递增的 `version`。客服修改接口必须回传最近读取的版本；版本过期或状态不允许时返回 HTTP 409，前端应刷新工单后再决定是否重试。
 
@@ -160,7 +155,7 @@ pnpm --filter @deepseek-ai/dsh-qabot run db:migrate:mysql
 
 MySQL 后端提供完整的 Conversation、Ticket、Audit 和 Outbox Repository。服务启动以及知识同步、审核、发布、上下架或删除后，会把知识来源、文档、版本、分块、资产和向量快照投影到 `hr_system`。投影只复制已有向量，不会请求 embedding；Repository 切换期间 `kb.db` 仍是可重建的 FTS 与相似度检索缓存。部署配置为 `QABOT_DATABASE_BACKEND=mysql` 与 `QABOT_MYSQL_URL`；启动会自动执行待处理迁移。真实集成测试只读取 `QABOT_TEST_MYSQL_URL`，不得将其长期指向生产数据库。
 
-飞书转人工通知和人工公开回复先写入 `data/outbox.db`，HTTP 请求不等待飞书。后台任务按指数退避重试，最多八次；相同幂等键只入队一次。工单状态已变化的旧转人工通知会直接完成而不发送，避免转派后再通知旧队列。
+飞书转人工通知先写入 Outbox，再发送给所选服务组的全部已启用人员。后台任务按指数退避重试，最多八次；相同幂等键只创建一个通知任务。工单状态已变化的旧转人工通知会直接完成而不发送，避免转派后再通知旧队列。
 
 满意度在员工门户聊天界面完成，不通过飞书卡片。工单处于 `resolved` 或 `closed` 时，所属员工可提交一次 1-5 分评价；请求必须携带工单最新 `version`，重复评价或版本冲突返回 HTTP 409。工单不存储服务评论字段。
 | `PORTAL_URL` | http://localhost:5173 | 转人工卡片「进入后台」跳转地址 |

@@ -5,7 +5,7 @@ import type { AuditRecord } from '../audit/store.ts'
 import type { Conversation } from '../conversation/store.ts'
 import type { AuditRepository, ConversationRepository, OutboxRepository, TicketRepository } from '../domain/repositories.ts'
 import type { OutboxEventType, OutboxMessage } from '../integration/outbox.ts'
-import type { Ticket, TicketKind, TicketPriority, TicketStatus } from '../ticket/store.ts'
+import type { Ticket, TicketKind, TicketStatus } from '../ticket/store.ts'
 
 interface ConversationRow extends RowDataPacket {
   user_key: string
@@ -240,7 +240,6 @@ interface TicketRow extends RowDataPacket {
   user_key: string
   kind: TicketKind
   status: TicketStatus
-  priority: TicketPriority
   department: string | null
   assignee: string | null
   question: string
@@ -248,9 +247,6 @@ interface TicketRow extends RowDataPacket {
   service_end: number | null
   satisfaction: number | null
   handoff_reason: string | null
-  first_response_due_at: number | null
-  resolution_due_at: number | null
-  first_agent_response_at: number | null
   created_at: number
   updated_at: number
   version: number
@@ -259,10 +255,9 @@ interface TicketRow extends RowDataPacket {
 function toTicket(row: TicketRow): Ticket {
   return {
     id: row.id, sessionId: row.session_id, userKey: row.user_key, kind: row.kind, status: row.status,
-    department: row.department, assignee: row.assignee, question: row.question, priority: row.priority,
+    department: row.department, assignee: row.assignee, question: row.question,
     serviceStart: row.service_start, serviceEnd: row.service_end, satisfaction: row.satisfaction,
-    handoffReason: row.handoff_reason, firstResponseDueAt: row.first_response_due_at,
-    resolutionDueAt: row.resolution_due_at, firstAgentResponseAt: row.first_agent_response_at,
+    handoffReason: row.handoff_reason,
     createdAt: row.created_at, updatedAt: row.updated_at, version: row.version,
   }
 }
@@ -390,8 +385,8 @@ export class MysqlTicketRepository implements TicketRepository {
     await connection.beginTransaction()
     try {
       const [updated] = await connection.execute<ResultSetHeader>(`UPDATE tickets SET status = 'waiting_employee',
-        first_agent_response_at = COALESCE(first_agent_response_at, ?), updated_at = ?, version = version + 1 WHERE id = ? AND version = ?
-        AND status IN ('in_service', 'waiting_employee')`, [Date.now(), Date.now(), ticketId, expectedVersion])
+        updated_at = ?, version = version + 1 WHERE id = ? AND version = ?
+        AND status IN ('in_service', 'waiting_employee')`, [Date.now(), ticketId, expectedVersion])
       if (updated.affectedRows === 0) {
         await connection.commit()
         connection.release()

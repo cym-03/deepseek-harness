@@ -48,11 +48,8 @@ The portal base64url-encodes the UTF-8 JSON identity claims and signs that encod
 | `GET /v1/agent/tickets/:id` | Read an authorized ticket and its public replies |
 | `POST /v1/agent/tickets/:id/accept` | Accept using the signed `employeeId` and `{ version }` |
 | `POST /v1/agent/tickets/:id/reply` | Append `{ message, version }` and enter `waiting_employee` |
-| `POST /v1/agent/tickets/:id/priority` | Set `{ priority, version }` with optimistic concurrency |
 | `POST /v1/knowledge/versions/:id/publish` | Publish a reviewed version with optional `{ effectiveAt, expiresAt }` |
 | `POST /v1/knowledge/:source/publication` | Set `{ online }` without deleting versions or vectors |
-| `GET /v1/system/service-policies` | List service-group priority and SLA policies as SystemAdmin |
-| `POST /v1/system/service-policies/:group` | Update one service-group policy as SystemAdmin |
 | `GET /v1/system/audit` | Let SystemAdmin query privileged-operation audit records |
 
 ## HTTP API
@@ -125,9 +122,7 @@ DEEPSEEK_BASE_URL=http://<relay>/v1 node --import tsx/esm apps/qabot/src/bin.ts 
 | `QABOT_DATABASE_BACKEND` | sqlite | Business repository: `sqlite`, `mysql`, or `postgres` |
 | `QABOT_MYSQL_URL` | none | Required when the business repository is MySQL |
 
-The service desk presents four states: pending, waiting for acceptance, processing, and completed. AI-only tickets remain pending, are visible only to supervisors, and complete after the idle timeout. Human handoffs wait for acceptance, enter processing after acceptance, and complete when service ends. A transfer selects both a service group and a specific member.
-
-The MySQL service-group policy sets each newly handed-off or transferred ticket's default priority, first-response deadline, and resolution deadline. The first public staff reply records the first-response time. Managers can change policies and individual priorities in the portal; both mutations are audited. Deadlines use elapsed minutes rather than a business-hours calendar.
+The service desk presents four states: pending, waiting for acceptance, processing, and completed. AI-only tickets remain pending, are visible only to supervisors, and complete after the idle timeout. A human handoff enters the selected group's shared waiting queue and notifies every active group member without choosing an assignee. The first member to accept owns the ticket. A later transfer selects both a service group and a specific member.
 
 Ticket responses contain a monotonically increasing `version`. Agent mutations submit the most recently read version; a stale version or invalid state returns HTTP 409 so the client can refresh before deciding whether to retry.
 
@@ -160,7 +155,7 @@ pnpm --filter @deepseek-ai/dsh-qabot run db:migrate:mysql
 
 The MySQL provider implements Conversation, Ticket, Audit, and Outbox repositories. It also projects every knowledge snapshot into `knowledge_sources`, documents, versions, chunks, assets, and embeddings at startup and after synchronization, review, publication, or removal. Projection copies stored vectors without requesting embeddings; `kb.db` remains the rebuildable FTS and similarity-search cache during the repository cutover. Configure `QABOT_DATABASE_BACKEND=mysql` and `QABOT_MYSQL_URL`; startup applies pending migrations. Real integration tests read only `QABOT_TEST_MYSQL_URL` and must not remain pointed at production.
 
-Feishu handoff notifications and public-reply events first enter the Outbox. Delivery retries with exponential backoff up to eight times, and one idempotency key creates only one message. A stale handoff notification completes without sending when the ticket state has already changed.
+Feishu handoff notifications first enter the Outbox and fan out to every active member of the selected service group. Delivery retries with exponential backoff up to eight times, and one idempotency key creates only one notification job. A stale handoff notification completes without sending when the ticket state has already changed.
 
 Employees submit satisfaction scores in the portal conversation rather than Feishu. An employee can rate an owned `resolved` or `closed` ticket once with a score from 1 to 5 and the latest ticket `version`. Duplicate scores and version conflicts return HTTP 409. Tickets do not store a service-comment field.
 | `PORTAL_URL` | http://localhost:5173 | Service-card administration destination |

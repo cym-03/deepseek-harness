@@ -12,6 +12,7 @@ describe('MySQL schema style', () => {
       '003_knowledge_publication.sql',
       '004_knowledge_asset_binary.sql',
       '005_ticket_sla_policy.sql',
+      '006_remove_ticket_priority.sql',
     ]) {
       const migration = await readFile(fileURLToPath(new URL(`../migrations/mysql/${name}`, import.meta.url)), 'utf8')
       expect(verifyMysqlSchemaStyle(migration)).toEqual([])
