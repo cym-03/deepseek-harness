@@ -160,6 +160,7 @@ MySQL 后端提供完整的 Conversation、Ticket、Audit 和 Outbox Repository�
 | `VISION_EMBED_API_KEY` | `EMBED_API_KEY` | 百炼 API Key；视觉模型使用 DashScope 多模态接口，不走 OpenAI `/embeddings` |
 | `VISION_EMBED_BASE_URL` | `https://dashscope.aliyuncs.com/api/v1` | DashScope 多模态 API 地址 |
 | `VISION_EMBED_DIMENSION` | 1024 | 视觉向量维度；修改后已有视觉向量会自动增量重算 |
+| `VISION_EMBED_MAX_PER_SYNC` | 20 | 单次同步最多生成的缺失或失效视觉向量数量 |
 
 ### 日志
 - 控制台 + `apps/qabot/data/qabot.log`（带时间戳/级别）
@@ -187,4 +188,3 @@ schtasks /Delete /TN "qabot-service" /F
 - **视觉检索**：设置 `VISION_EMBED_MODEL=qwen3-vl-embedding` 后，飞书文档图片会下载并生成独立视觉向量。员工文本查询使用同一模型生成查询向量，与文本检索结果合并。需要飞书 `drive:drive:readonly` 下载权限。
 - **飞书权限**：应用需开通 `im:message:send_as_bot`（发消息）等权限，否则发送会降级为仅记日志。
 - 工具注册必须 `defineTool`（裸 register 的 parameters 不转 JSON Schema，中继拒收）。
-

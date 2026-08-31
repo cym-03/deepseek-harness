@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write apps/qabot/README.md
-README.md: 5b0a3914c4256ec85ce68b8a7f5486692ae23d35
-README.zh.md: e2c79cac67373894a6b1265c40a29bc012d3da59
+README.md: 6b1218bee38f2051d5b6bcc9805988ef8e3096c5
+README.zh.md: 7f8f90e41cdbcc2c79ba6b6992707a410bc30900
