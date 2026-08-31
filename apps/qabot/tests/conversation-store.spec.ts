@@ -16,6 +16,7 @@ describe('ConversationStore activity ordering', () => {
       store.touch('employee', 'older', 3, 'updated')
       expect(store.list('employee').map(item => item.sessionId)).toEqual(['older', 'newer'])
       expect(store.list('employee')[0]).toMatchObject({ lastMessageAt: 300, messageCount: 3 })
+      expect(store.listAll().map(item => item.sessionId)).toEqual(['older', 'newer'])
     } finally {
       now.mockRestore()
       store.dispose()

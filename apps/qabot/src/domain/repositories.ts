@@ -3,6 +3,7 @@ import type { AuditRecord } from '../audit/store.ts'
 import type { Conversation } from '../conversation/store.ts'
 import type { OutboxEventType, OutboxMessage } from '../integration/outbox.ts'
 import type { Ticket, TicketStatus } from '../ticket/store.ts'
+import type { KbMediaRef } from '../kb/store.ts'
 
 export type Awaitable<T> = T | Promise<T>
 
@@ -11,8 +12,32 @@ export interface ConversationRepository {
   touch(userKey: string, sessionId: string, messageCount: number, firstQuestion?: string): Awaitable<void>
   findEmpty(userKey: string): Awaitable<Conversation | undefined>
   list(userKey: string): Awaitable<Conversation[]>
+  listAll(): Awaitable<Conversation[]>
   ownerOf(sessionId: string): Awaitable<string | undefined>
   archive(userKey: string, sessionId: string): Awaitable<boolean>
+}
+
+export type ConversationMessageRole = 'user' | 'assistant' | 'human' | 'system'
+
+export interface ConversationMessageProjection {
+  sessionId: string
+  sourceType: 'dsh_event' | 'ticket_reply' | 'system'
+  sourceId: string
+  sourceOrder: number
+  role: ConversationMessageRole
+  text: string
+  createdAt: number
+  images?: KbMediaRef[]
+}
+
+export interface ConversationMessage extends ConversationMessageProjection {
+  id: number
+}
+
+export interface ConversationMessageRepository {
+  upsert(messages: readonly ConversationMessageProjection[]): Awaitable<void>
+  list(sessionId: string): Awaitable<ConversationMessage[]>
+  count(sessionId?: string): Awaitable<number>
 }
 
 export interface TicketRepository {

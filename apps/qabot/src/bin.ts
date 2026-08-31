@@ -3,6 +3,7 @@
  *   console  控制台原型（默认）：命令行模拟问答 + 工单
  *   feishu   飞书网关：长连接接收消息，问答 + 工单
  *   ingest   把 docs/ 目录索引进知识库
+ *   project-messages  把现有 DSH 会话与工单回复投影到业务数据库
  *
  * 启动前需要：DEEPSEEK_BASE_URL 由 shell 导出（不允许写 .env）；
  * DEEPSEEK_API_KEY / FEISHU_APP_ID / FEISHU_APP_SECRET 放根 .env。
@@ -28,6 +29,7 @@ import { OutboxWorker, type OutboxHandler } from './integration/outbox.ts'
 import { loadPostgresMigrations, migratePostgresUrl } from './database/postgres-migrator.ts'
 import { createQabotRepositories, type QabotRepositories } from './database/runtime.ts'
 import { loadMysqlMigrations, migrateMysqlUrl } from './database/mysql-migrator.ts'
+import { loadConversationTimeline } from './conversation/timeline.ts'
 
 const root = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..')
 const appDir = join(root, 'apps', 'qabot')
@@ -90,6 +92,30 @@ async function cmdMigrateMysql(): Promise<void> {
   if (url === undefined || url.trim() === '') throw new Error('migrate-mysql 需要 QABOT_MYSQL_URL')
   const applied = await migrateMysqlUrl(url, await loadMysqlMigrations(mysqlMigrationsDir))
   console.log(applied.length === 0 ? 'MySQL 数据库已是最新版本' : `MySQL 已执行迁移：${applied.join(', ')}`)
+}
+
+async function cmdProjectMessages(): Promise<void> {
+  const { qabot, repositories, dispose } = await buildQabot()
+  const kb = new KbStore(kbDbPath)
+  try {
+    if (repositories.messages === undefined) throw new Error('当前数据库后端未配置聊天消息投影')
+    const conversations = await qabot.listAllConversations()
+    let completed = 0
+    const failures: string[] = []
+    for (const conversation of conversations) {
+      try {
+        await loadConversationTimeline(conversation.sessionId, qabot, repositories.tickets, kb, repositories.messages)
+        completed += 1
+      } catch (error) {
+        failures.push(`${conversation.sessionId}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    console.log(`[message-storage] 会话投影完成 conversations=${completed} messages=${await repositories.messages.count()}`)
+    if (failures.length > 0) throw new Error(`有 ${failures.length} 个会话投影失败：${failures.join('; ')}`)
+  } finally {
+    kb.dispose()
+    await dispose()
+  }
 }
 
 async function cmdConsole(): Promise<void> {
@@ -232,6 +258,7 @@ async function cmdServe(): Promise<void> {
     staff,
     audit,
     outbox,
+    ...repositories.messages === undefined ? {} : { messages: repositories.messages },
     ...projectKnowledge !== undefined ? { projectKnowledge } : {},
     ...syncFeishu !== undefined ? { sources: kbSources, syncFeishu } : {},
   })
@@ -278,6 +305,8 @@ async function main(): Promise<void> {
     await cmdMigratePostgres()
   } else if (sub === 'migrate-mysql') {
     await cmdMigrateMysql()
+  } else if (sub === 'project-messages') {
+    await cmdProjectMessages()
   } else if (sub === 'console' || sub === 'dev') {
     await cmdConsole()
   } else if (sub === 'feishu') {
@@ -285,7 +314,7 @@ async function main(): Promise<void> {
   } else if (sub === 'serve') {
     await cmdServe()
   } else {
-    console.error(`未知子命令：${sub}（可用：console | feishu | serve | ingest | migrate-postgres | migrate-mysql）`)
+    console.error(`未知子命令：${sub}（可用：console | feishu | serve | ingest | migrate-postgres | migrate-mysql | project-messages）`)
     process.exitCode = 1
   }
 }

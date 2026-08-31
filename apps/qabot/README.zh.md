@@ -155,6 +155,8 @@ pnpm --filter @deepseek-ai/dsh-qabot run db:migrate:mysql
 
 MySQL 后端提供完整的 Conversation、Ticket、Audit 和 Outbox Repository。服务启动以及知识同步、审核、发布、上下架或删除后，会把知识来源、文档、版本、分块、资产和向量快照投影到 `hr_system`。投影只复制已有向量，不会请求 embedding；Repository 切换期间 `kb.db` 仍是可重建的 FTS 与相似度检索缓存。部署配置为 `QABOT_DATABASE_BACKEND=mysql` 与 `QABOT_MYSQL_URL`；启动会自动执行待处理迁移。真实集成测试只读取 `QABOT_TEST_MYSQL_URL`，不得将其长期指向生产数据库。
 
+员工、智能助手与人工客服公开消息使用稳定来源标识投影到 MySQL `conversation_messages`。DSH 会话事件继续保存模型可见历史，门户时间线则读取持久业务投影，并且不会因某次会话文件读取为空而删除已存消息。已有会话可执行一次 `pnpm --filter @deepseek-ai/dsh-qabot run db:project-messages` 完成回填；该命令具备幂等性，不会调用语言模型或向量模型。
+
 飞书转人工通知先写入 Outbox，再发送给所选服务组的全部已启用人员。后台任务按指数退避重试，最多八次；相同幂等键只创建一个通知任务。工单状态已变化的旧转人工通知会直接完成而不发送，避免转派后再通知旧队列。
 
 满意度在员工门户聊天界面完成，不通过飞书卡片。工单处于 `resolved` 或 `closed` 时，所属员工可提交一次 1-5 分评价；请求必须携带工单最新 `version`，重复评价或版本冲突返回 HTTP 409。工单不存储服务评论字段。

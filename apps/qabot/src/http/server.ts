@@ -27,13 +27,17 @@ import { KbStore, type KbMediaRef } from '../kb/store.ts'
 import { KbSourcesStore } from '../kb/sources.ts'
 import { StaffStore } from '../staff/store.ts'
 import type { Ticket } from '../ticket/store.ts'
-
-const EMPLOYEE_TICKET_MESSAGE_PREFIX = '【员工消息】'
+import { EMPLOYEE_TICKET_MESSAGE_PREFIX, loadConversationTimeline } from '../conversation/timeline.ts'
 import { Qabot } from '../runner.ts'
 import { buildWeeklyReport } from '../report/weekly.ts'
 import { hasRole, verifyPortalIdentity, type PortalIdentity } from '../security/identity.ts'
 import { canAccessTicket, isServiceDeskUser } from '../security/authorization.ts'
-import type { AuditRepository, OutboxRepository, TicketRepository } from '../domain/repositories.ts'
+import type {
+  AuditRepository,
+  ConversationMessageRepository,
+  OutboxRepository,
+  TicketRepository,
+} from '../domain/repositories.ts'
 
 const PUBLIC_DIR = join(fileURLToPath(new URL('.', import.meta.url)), 'public')
 
@@ -87,10 +91,11 @@ export interface QabotHttpOptions {
   projectKnowledge?: () => Promise<void>
   audit: AuditRepository
   outbox: OutboxRepository
+  messages?: ConversationMessageRepository
 }
 
 export async function startHttpServer(options: QabotHttpOptions): Promise<ReturnType<typeof createServer>> {
-  const { qabot, tickets, kb, staff, audit, outbox, sources, syncFeishu, projectKnowledge } = options
+  const { qabot, tickets, kb, staff, audit, outbox, messages, sources, syncFeishu, projectKnowledge } = options
   const token = process.env.QABOT_API_TOKEN
   if (token === undefined || token.trim() === '') {
     throw new Error('必须配置 QABOT_API_TOKEN（所有环境强制）。未配置时拒绝启动，防止内网机器绕过门户直接调用本服务；apps/qabot/start-qabot.bat 已内置默认令牌。')
@@ -253,56 +258,18 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
 
   const conversationPayload = async (sessionId: string): Promise<{
     sessionId: string
-    messages: Array<{ role: 'user' | 'assistant' | 'human'; text: string; createdAt: number; images?: KbMediaRef[] }>
+    messages: Array<{ role: 'user' | 'assistant' | 'human' | 'system'; text: string; createdAt: number; images?: KbMediaRef[] }>
     ticket: Ticket | null
     handoffRecommended: boolean
   }> => {
-    const events = await qabot.transcript(sessionId)
-    const mediaByOrder = kb.conversationMedia(sessionId)
-    const messages: Array<{
-      role: 'user' | 'assistant' | 'human'
-      text: string
-      createdAt: number
-      order: number
-      images?: KbMediaRef[]
-    }> = []
-    for (const event of events) {
-      if (event.type === 'user/message') {
-        let text = event.data.content?.filter(block => block.type === 'text').map(block => block.text).join('') ?? ''
-        if (text.startsWith('【人工接管期间员工消息】')) text = text.slice('【人工接管期间员工消息】'.length)
-        if (text !== '' && !text.startsWith('【人工客服回复】') && !text.startsWith('【系统重试】')) {
-          messages.push({ role: 'user', text, createdAt: event.time, order: event.seq })
-        }
-      } else if (event.type === 'assistant/message') {
-        const text = event.data.message.content.filter(block => block.type === 'text').map(block => block.text).join('')
-        if (text !== '') {
-          messages.push({
-            role: 'assistant',
-            text,
-            createdAt: event.time,
-            order: event.seq,
-            images: mediaByOrder.get(event.seq) ?? [],
-          })
-        }
-      }
-    }
-    for (const reply of await tickets.repliesBySession(sessionId)) {
-      const employeeMessage = reply.message.startsWith(EMPLOYEE_TICKET_MESSAGE_PREFIX)
-      messages.push({
-        role: employeeMessage ? 'user' : 'human',
-        text: employeeMessage ? reply.message.slice(EMPLOYEE_TICKET_MESSAGE_PREFIX.length) : reply.message,
-        createdAt: reply.createdAt,
-        order: reply.id,
-      })
-    }
-    messages.sort((left, right) => left.createdAt - right.createdAt || left.order - right.order)
+    const timeline = await loadConversationTimeline(sessionId, qabot, tickets, kb, messages)
     const ticket = await tickets.forSession(sessionId)
-    const handoffRecommended = ticket?.status === 'open' && events.some(
+    const handoffRecommended = ticket?.status === 'open' && timeline.events.some(
       event => event.type === 'tool/call' && event.data.name === 'request_human_handoff',
     )
     return {
       sessionId,
-      messages: messages.map(({ role, text, createdAt, images }) => ({
+      messages: timeline.messages.map(({ role, text, createdAt, images }) => ({
         role,
         text,
         createdAt,
@@ -401,8 +368,10 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     const body = ctx.json as { message?: unknown }
     const message = typeof body.message === 'string' ? body.message.trim() : ''
     if (message === '' || message.length > maxMessageLength) throw new Error('MESSAGE_INVALID')
-    const outcome = await answerConversation(identity.employeeId, message, ctx.params.sessionId)
-    publishTicketChange(await tickets.forSession(ctx.params.sessionId ?? ''))
+    const sessionId = ctx.params.sessionId ?? ''
+    const outcome = await answerConversation(identity.employeeId, message, sessionId)
+    await loadConversationTimeline(sessionId, qabot, tickets, kb, messages)
+    publishTicketChange(await tickets.forSession(sessionId))
     return outcome
   })
 
@@ -423,6 +392,7 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     event('started', { sessionId })
     try {
       const outcome = await answerConversation(identity.employeeId, message, sessionId)
+      await loadConversationTimeline(sessionId, qabot, tickets, kb, messages)
       publishTicketChange(await tickets.forSession(sessionId))
       if (typeof outcome.text === 'string' && outcome.text !== '') event('text-delta', { text: outcome.text })
       if (Array.isArray(outcome.images)) {
@@ -931,39 +901,21 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
       send(ctx.res, 404, { error: '工单不存在' })
       return undefined
     }
-    const events = await qabot.transcript(ticket.sessionId)
+    const timeline = await loadConversationTimeline(ticket.sessionId, qabot, tickets, kb, messages)
+    const events = timeline.events
     const limitRaw = Number(ctx.url.searchParams.get('transcriptLimit') ?? 200)
     const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 200
     const replies = await tickets.repliesBySession(ticket.sessionId)
-    const messages: Array<{ role: 'user' | 'ai' | 'human'; text: string; createdAt: number; order: number }> = []
-    for (const event of events) {
-      if (event.type === 'user/message') {
-        let text = event.data.content.filter(block => block.type === 'text').map(block => block.text).join('')
-        if (text.startsWith('【人工接管期间员工消息】')) text = text.slice('【人工接管期间员工消息】'.length)
-        if (text !== '' && !text.startsWith('【人工客服回复】') && !text.startsWith('【系统重试】')) {
-          messages.push({ role: 'user', text, createdAt: event.time, order: event.seq })
-        }
-      } else if (event.type === 'assistant/message') {
-        const text = event.data.message.content.filter(block => block.type === 'text').map(block => block.text).join('')
-        if (text !== '') messages.push({ role: 'ai', text, createdAt: event.time, order: event.seq })
-      }
-    }
-    for (const reply of replies) {
-      const employeeMessage = reply.message.startsWith(EMPLOYEE_TICKET_MESSAGE_PREFIX)
-      messages.push({
-        role: employeeMessage ? 'user' : 'human',
-        text: employeeMessage ? reply.message.slice(EMPLOYEE_TICKET_MESSAGE_PREFIX.length) : reply.message,
-        createdAt: reply.createdAt,
-        order: reply.id,
-      })
-    }
-    messages.sort((left, right) => left.createdAt - right.createdAt || left.order - right.order)
     return {
       ticket,
       transcript: events.slice(-limit),
       transcriptTotal: events.length,
       replies,
-      messages: messages.map(({ role, text, createdAt }) => ({ role, text, createdAt })),
+      messages: timeline.messages.map(({ role, text, createdAt }) => ({
+        role: role === 'assistant' ? 'ai' : role,
+        text,
+        createdAt,
+      })),
     }
   })
 

@@ -3,7 +3,15 @@ import { randomUUID } from 'node:crypto'
 import type { Pool, PoolConnection, ResultSetHeader, RowDataPacket } from 'mysql2/promise'
 import type { AuditRecord } from '../audit/store.ts'
 import type { Conversation } from '../conversation/store.ts'
-import type { AuditRepository, ConversationRepository, OutboxRepository, TicketRepository } from '../domain/repositories.ts'
+import type {
+  AuditRepository,
+  ConversationMessage,
+  ConversationMessageProjection,
+  ConversationMessageRepository,
+  ConversationRepository,
+  OutboxRepository,
+  TicketRepository,
+} from '../domain/repositories.ts'
 import type { OutboxEventType, OutboxMessage } from '../integration/outbox.ts'
 import type { Ticket, TicketKind, TicketStatus } from '../ticket/store.ts'
 
@@ -65,6 +73,14 @@ export class MysqlConversationRepository implements ConversationRepository {
     return rows.map(toConversation)
   }
 
+  async listAll(): Promise<Conversation[]> {
+    const [rows] = await this.pool.query<ConversationRow[]>(`
+      SELECT user_key, session_id, title, created_at, last_message_at, message_count
+      FROM conversations WHERE archived_at IS NULL ORDER BY last_message_at DESC
+    `)
+    return rows.map(toConversation)
+  }
+
   async ownerOf(sessionId: string): Promise<string | undefined> {
     const [rows] = await this.pool.execute<Array<RowDataPacket & { user_key: string }>>(
       'SELECT user_key FROM conversations WHERE session_id = ? AND archived_at IS NULL LIMIT 1',
@@ -79,6 +95,94 @@ export class MysqlConversationRepository implements ConversationRepository {
       WHERE user_key = ? AND session_id = ? AND archived_at IS NULL
     `, [Date.now(), userKey, sessionId])
     return result.affectedRows > 0
+  }
+}
+
+interface ConversationMessageRow extends RowDataPacket {
+  id: number
+  session_id: string
+  source_type: ConversationMessage['sourceType']
+  source_id: string
+  source_order: number
+  role: ConversationMessage['role']
+  content: string
+  media_json: unknown
+  created_at: number
+}
+
+function parseMessageImages(value: unknown): ConversationMessage['images'] {
+  if (value === null) return undefined
+  const parsed = typeof value === 'string' ? JSON.parse(value) as unknown : value
+  return Array.isArray(parsed) ? parsed as ConversationMessage['images'] : undefined
+}
+
+/** MySQL projection used by employee and service-desk timeline queries. */
+export class MysqlConversationMessageRepository implements ConversationMessageRepository {
+  constructor(private readonly pool: Pool) {}
+
+  async upsert(messages: readonly ConversationMessageProjection[]): Promise<void> {
+    if (messages.length === 0) return
+    const projectedAt = Date.now()
+    const connection = await this.pool.getConnection()
+    await connection.beginTransaction()
+    try {
+      for (const message of messages) {
+        await connection.execute(`
+          INSERT INTO conversation_messages
+            (session_id, source_type, source_id, source_order, role, content, media_json, created_at, projected_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            source_order = VALUES(source_order), role = VALUES(role), content = VALUES(content),
+            media_json = VALUES(media_json), created_at = VALUES(created_at), projected_at = VALUES(projected_at)
+        `, [
+          message.sessionId,
+          message.sourceType,
+          message.sourceId,
+          message.sourceOrder,
+          message.role,
+          message.text,
+          message.images === undefined ? null : JSON.stringify(message.images),
+          message.createdAt,
+          projectedAt,
+        ])
+      }
+      await connection.commit()
+      connection.release()
+    } catch (error) {
+      await rollbackAndRelease(connection)
+      throw error
+    }
+  }
+
+  async list(sessionId: string): Promise<ConversationMessage[]> {
+    const [rows] = await this.pool.execute<ConversationMessageRow[]>(`
+      SELECT id, session_id, source_type, source_id, source_order, role, content, media_json, created_at
+      FROM conversation_messages WHERE session_id = ?
+      ORDER BY created_at, source_order, id
+    `, [sessionId])
+    return rows.map((row) => {
+      const images = parseMessageImages(row.media_json)
+      return {
+        id: row.id,
+        sessionId: row.session_id,
+        sourceType: row.source_type,
+        sourceId: row.source_id,
+        sourceOrder: Number(row.source_order),
+        role: row.role,
+        text: row.content,
+        createdAt: Number(row.created_at),
+        ...(images === undefined ? {} : { images }),
+      }
+    })
+  }
+
+  async count(sessionId?: string): Promise<number> {
+    const [rows] = sessionId === undefined
+      ? await this.pool.query<Array<RowDataPacket & { count: number }>>('SELECT COUNT(*) AS count FROM conversation_messages')
+      : await this.pool.execute<Array<RowDataPacket & { count: number }>>(
+        'SELECT COUNT(*) AS count FROM conversation_messages WHERE session_id = ?', [sessionId],
+      )
+    return rows[0]?.count ?? 0
   }
 }
 

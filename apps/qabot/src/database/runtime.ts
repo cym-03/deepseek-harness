@@ -3,13 +3,20 @@ import { join } from 'node:path'
 import postgres from 'postgres'
 import { AuditStore } from '../audit/store.ts'
 import { ConversationStore } from '../conversation/store.ts'
-import type { AuditRepository, ConversationRepository, OutboxRepository, TicketRepository } from '../domain/repositories.ts'
+import type {
+  AuditRepository,
+  ConversationMessageRepository,
+  ConversationRepository,
+  OutboxRepository,
+  TicketRepository,
+} from '../domain/repositories.ts'
 import { OutboxStore } from '../integration/outbox.ts'
 import { TicketStore } from '../ticket/store.ts'
 import { createMysqlPool, loadMysqlMigrations, migrateMysql } from './mysql-migrator.ts'
 import { MysqlKnowledgeProjection } from './mysql-knowledge-projection.ts'
 import {
   MysqlAuditRepository,
+  MysqlConversationMessageRepository,
   MysqlConversationRepository,
   MysqlOutboxRepository,
   MysqlTicketRepository,
@@ -27,6 +34,7 @@ export interface QabotRepositories {
   tickets: TicketRepository
   audit: AuditRepository
   outbox: OutboxRepository
+  messages?: ConversationMessageRepository
   knowledge?: MysqlKnowledgeProjection
   dispose(): Promise<void>
 }
@@ -69,6 +77,7 @@ export async function createQabotRepositories(
     }
     return {
       conversations: new MysqlConversationRepository(pool),
+      messages: new MysqlConversationMessageRepository(pool),
       tickets: new MysqlTicketRepository(pool),
       audit: new MysqlAuditRepository(pool),
       outbox: new MysqlOutboxRepository(pool),

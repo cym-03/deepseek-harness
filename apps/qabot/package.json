@@ -12,6 +12,7 @@
     "dev:ingest": "node --import tsx/esm src/bootstrap.ts ingest",
     "db:migrate:postgres": "node --import tsx/esm src/bootstrap.ts migrate-postgres",
     "db:migrate:mysql": "node --import tsx/esm src/bootstrap.ts migrate-mysql",
+    "db:project-messages": "node --import tsx/esm src/bootstrap.ts project-messages",
     "typecheck": "tsc --noEmit",
     "test": "pnpm --dir ../.. exec vitest run apps/qabot/tests"
   },

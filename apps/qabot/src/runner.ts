@@ -250,6 +250,11 @@ export class Qabot {
     return await this.conversations.list(userKey)
   }
 
+  /** Lists every active conversation for administrative projection jobs. */
+  async listAllConversations(): Promise<Conversation[]> {
+    return await this.conversations.listAll()
+  }
+
   /** 发一次提问（可指定会话），等 agent 空闲，返回结果并更新工单。 */
   async ask(userKey: string, question: string, requestedSessionId?: string): Promise<TurnOutcome> {
     return await this.turns.run(userKey, async () => this.askSerial(userKey, question, requestedSessionId))

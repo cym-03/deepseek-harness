@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 import { createMysqlPool, loadMysqlMigrations, migrateMysql } from '../src/database/mysql-migrator.ts'
 import {
   MysqlAuditRepository,
+  MysqlConversationMessageRepository,
   MysqlConversationRepository,
   MysqlOutboxRepository,
   MysqlTicketRepository,
@@ -29,6 +30,19 @@ describeMysql('MySQL Repository integration', () => {
       expect(await conversations.list(userKey)).toEqual([
         expect.objectContaining({ userKey, sessionId, title: '测试问题', messageCount: 1 }),
       ])
+      expect(await conversations.listAll()).toContainEqual(
+        expect.objectContaining({ userKey, sessionId }),
+      )
+
+      const messages = new MysqlConversationMessageRepository(pool)
+      await messages.upsert([{ sessionId, sourceType: 'dsh_event', sourceId: '1', sourceOrder: 1,
+        role: 'user', text: '测试消息', createdAt: 100 }])
+      await messages.upsert([{ sessionId, sourceType: 'dsh_event', sourceId: '1', sourceOrder: 1,
+        role: 'user', text: '测试消息已更新', createdAt: 100 }])
+      expect(await messages.list(sessionId)).toEqual([
+        expect.objectContaining({ sessionId, role: 'user', text: '测试消息已更新' }),
+      ])
+      expect(await messages.count(sessionId)).toBe(1)
 
       const audit = new MysqlAuditRepository(pool)
       expect(await audit.append({ actorId: userKey, action: 'test.action', resourceType: 'test', resourceId: suffix, detail: null }))
@@ -52,6 +66,7 @@ describeMysql('MySQL Repository integration', () => {
       expect(claimed).toBeDefined()
       if (claimed !== undefined) await outbox.complete(claimed.id)
     } finally {
+      await pool.execute('DELETE FROM conversation_messages WHERE session_id = ?', [sessionId])
       await pool.execute('DELETE FROM outbox_messages WHERE idempotency_key = ?', [outboxKey])
       await pool.execute('DELETE FROM audit_records WHERE actor_id = ?', [userKey])
       await pool.execute('DELETE FROM ticket_replies WHERE ticket_id IN (SELECT id FROM tickets WHERE user_key = ?)', [userKey])

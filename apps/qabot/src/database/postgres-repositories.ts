@@ -68,6 +68,14 @@ export class PostgresConversationRepository implements ConversationRepository {
     return rows.map(toConversation)
   }
 
+  async listAll(): Promise<Conversation[]> {
+    const rows = await this.sql<ConversationRow[]>`
+      SELECT user_key, session_id, title, created_at, last_message_at, message_count
+      FROM conversations WHERE archived_at IS NULL ORDER BY last_message_at DESC
+    `
+    return rows.map(toConversation)
+  }
+
   async ownerOf(sessionId: string): Promise<string | undefined> {
     const rows = await this.sql<{ user_key: string }[]>`
       SELECT user_key FROM conversations WHERE session_id = ${sessionId} AND archived_at IS NULL LIMIT 1

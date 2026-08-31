@@ -97,6 +97,13 @@ export class ConversationStore implements ConversationRepository {
     return rows.map(rowToConv)
   }
 
+  listAll(): Conversation[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM conversations WHERE archived_at IS NULL ORDER BY last_message_at DESC',
+    ).all() as unknown as ConvRow[]
+    return rows.map(rowToConv)
+  }
+
   ownerOf(sessionId: string): string | undefined {
     const row = this.db.prepare(
       'SELECT user_key FROM conversations WHERE session_id = ? AND archived_at IS NULL LIMIT 1',
