@@ -35,6 +35,37 @@ const EMPTY_RETRY_PROMPT = '【系统重试】上一轮模型未返回任何内�
 /** 事件流回调（Phase 1b 飞书流式回传用）。 */
 export type SessionEventListener = (sessionId: string, event: SessionEvent) => void
 
+/**
+ * Reports whether Qabot has a durable DSH log for a conversation.
+ * @param repositoryRoot - Absolute repository root that owns `apps/qabot/data`.
+ * @param sessionId - Conversation session identifier.
+ * @returns Whether any persisted project directory contains the session log.
+ */
+export function hasPersistedQabotSession(repositoryRoot: string, sessionId: string): boolean {
+  const sessionRoot = join(repositoryRoot, 'apps', 'qabot', 'data', 'sessions')
+  return existsSync(sessionRoot) && readdirSync(sessionRoot).some(
+    cwdDirectory => existsSync(join(sessionRoot, cwdDirectory, sessionId, 'session.jsonl.zstd')),
+  )
+}
+
+/**
+ * Resolves the historical workspace recorded by Qabot's persisted directory layout.
+ * @param repositoryRoot - Absolute repository root that owns `apps/qabot/data`.
+ * @param sessionId - Conversation session identifier.
+ * @returns Repository root or the historical `apps/qabot` workspace.
+ */
+export function resolveQabotSessionCwd(repositoryRoot: string, sessionId: string): string {
+  const sessionRoot = join(repositoryRoot, 'apps', 'qabot', 'data', 'sessions')
+  if (!existsSync(sessionRoot)) return repositoryRoot
+  for (const cwdDirectory of readdirSync(sessionRoot)) {
+    if (!existsSync(join(sessionRoot, cwdDirectory, sessionId))) continue
+    return cwdDirectory.includes('apps-qabot')
+      ? join(repositoryRoot, 'apps', 'qabot')
+      : repositoryRoot
+  }
+  return repositoryRoot
+}
+
 async function waitUntilIdle(agent: Agent, timeoutMs: number): Promise<boolean> {
   let timer: ReturnType<typeof setTimeout> | undefined
   const timeout = new Promise<true>((resolve) => {
@@ -94,6 +125,7 @@ export class Qabot {
     private readonly ctx: Context,
     private readonly tickets: TicketRepository,
     private readonly conversations: ConversationRepository,
+    private readonly repositoryRoot: string,
     private readonly onEvent?: SessionEventListener,
   ) {
     // 火线订阅所有会话事件，按 sessionId 路由（Phase 1b 飞书流式用）。
@@ -170,23 +202,11 @@ export class Qabot {
 
   /** 兼容从仓库根目录和 apps/qabot 两种历史启动目录写入的会话。 */
   private sessionCwd(sessionId: string): string {
-    const repositoryRoot = process.cwd()
-    const sessionRoot = join(repositoryRoot, 'apps', 'qabot', 'data', 'sessions')
-    if (!existsSync(sessionRoot)) return repositoryRoot
-    for (const cwdDirectory of readdirSync(sessionRoot)) {
-      if (!existsSync(join(sessionRoot, cwdDirectory, sessionId))) continue
-      return cwdDirectory.includes('apps-qabot')
-        ? join(repositoryRoot, 'apps', 'qabot')
-        : repositoryRoot
-    }
-    return repositoryRoot
+    return resolveQabotSessionCwd(this.repositoryRoot, sessionId)
   }
 
   private hasPersistedSession(sessionId: string): boolean {
-    const sessionRoot = join(process.cwd(), 'apps', 'qabot', 'data', 'sessions')
-    return existsSync(sessionRoot) && readdirSync(sessionRoot).some(
-      cwdDirectory => existsSync(join(sessionRoot, cwdDirectory, sessionId, 'session.jsonl.zstd')),
-    )
+    return hasPersistedQabotSession(this.repositoryRoot, sessionId)
   }
 
   /** 取（或建）该用户当前会话。 */

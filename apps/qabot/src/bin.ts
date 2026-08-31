@@ -53,7 +53,7 @@ async function buildQabot(): Promise<{ qabot: Qabot; repositories: QabotReposito
     await repositories.dispose()
     throw error
   }
-  const qabot = new Qabot(ctx, repositories.tickets, repositories.conversations)
+  const qabot = new Qabot(ctx, repositories.tickets, repositories.conversations, root)
   return {
     qabot,
     repositories,
