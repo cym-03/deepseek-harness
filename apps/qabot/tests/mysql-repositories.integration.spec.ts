@@ -37,11 +37,18 @@ describeMysql('MySQL Repository integration', () => {
 
       const messages = new MysqlConversationMessageRepository(pool)
       await messages.upsert([{ sessionId, sourceType: 'dsh_event', sourceId: '1', sourceOrder: 1,
-        role: 'user', text: '测试消息', createdAt: 100 }])
+        role: 'user', text: '测试消息', createdAt: 100,
+        images: [{ id: 42, title: '知识图片', sourceUrl: 'https://example.test/doc' }] }])
       await messages.upsert([{ sessionId, sourceType: 'dsh_event', sourceId: '1', sourceOrder: 1,
         role: 'user', text: '测试消息已更新', createdAt: 100 }])
       expect(await messages.list(sessionId)).toEqual([
-        expect.objectContaining({ sessionId, role: 'user', text: '测试消息已更新', createdAt: 100 }),
+        expect.objectContaining({
+          sessionId,
+          role: 'user',
+          text: '测试消息已更新',
+          createdAt: 100,
+          images: [{ id: 42, title: '知识图片', sourceUrl: 'https://example.test/doc' }],
+        }),
       ])
       expect(await messages.count(sessionId)).toBe(1)
       expect(await messages.unreadCounts([sessionId], 'agent:test', ['user'])).toEqual(new Map([[sessionId, 1]]))
@@ -78,7 +85,7 @@ describeMysql('MySQL Repository integration', () => {
       const outbox = new MysqlOutboxRepository(pool)
       expect(await outbox.enqueue(outboxKey, 'ticket.handoff', { ticketId: ticket.id })).toBe(true)
       expect(await outbox.enqueue(outboxKey, 'ticket.handoff', { ticketId: ticket.id })).toBe(false)
-      const claimed = (await outbox.pending(100)).find(message => message.idempotencyKey === outboxKey)
+      const claimed = (await outbox.pending(10_000)).find(message => message.idempotencyKey === outboxKey)
       expect(claimed).toBeDefined()
       if (claimed !== undefined) await outbox.complete(claimed.id)
     } finally {

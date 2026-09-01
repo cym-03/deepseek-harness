@@ -136,7 +136,8 @@ export class MysqlConversationMessageRepository implements ConversationMessageRe
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON DUPLICATE KEY UPDATE
             source_order = VALUES(source_order), role = VALUES(role), content = VALUES(content),
-            media_json = VALUES(media_json), created_at = VALUES(created_at), projected_at = VALUES(projected_at)
+            media_json = COALESCE(VALUES(media_json), media_json),
+            created_at = VALUES(created_at), projected_at = VALUES(projected_at)
         `, [
           message.sessionId,
           message.sourceType,

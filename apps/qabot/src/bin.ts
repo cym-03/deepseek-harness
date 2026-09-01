@@ -273,6 +273,7 @@ async function cmdServe(): Promise<void> {
     tickets,
     kb,
     ...repositories.knowledgeSearch === undefined ? {} : { knowledgeSearch: repositories.knowledgeSearch },
+    ...repositories.knowledgeSearch === undefined ? {} : { knowledgeMedia: repositories.knowledgeSearch },
     staff,
     audit,
     outbox,

@@ -100,11 +100,6 @@ function embeddingContentHash(content: string): string {
   return createHash('sha256').update(content).digest('hex')
 }
 
-/** 只有员工明确需要视觉材料时才调用跨模态查询，避免普通文本问答消耗视觉额度。 */
-function hasVisionIntent(query: string): boolean {
-  return /图片|图表|流程图|截图|照片|示意图|结构图|组织架构图|看图|查看图|展示图/.test(query)
-}
-
 /** 按字节截断文本（UTF-8），避免把 emoji 之类切断。 */
 function truncate(text: string, maxBytes: number): string {
   if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text
@@ -442,7 +437,7 @@ export class KbStore {
    */
   async findVisionMedia(query: string, limit = 3): Promise<KbMediaRef[]> {
     const q = query.trim()
-    if (q === '' || !hasVisionIntent(q) || !visionEmbeddingsConfigured()) return []
+    if (q === '' || !visionEmbeddingsConfigured()) return []
     const rows = this.db.prepare(`
       SELECT d.id, d.title, d.url, e.vector
       FROM docs d
@@ -923,7 +918,7 @@ export class KbStore {
     const kwHits = this.searchKeywords(q, limit)
     const [vecHits, visionHits] = await Promise.all([
       this.searchVector(q, limit),
-      (hasVisionIntent(q) ? this.searchVision(q, limit) : Promise.resolve([])).catch((error: unknown) => {
+      this.searchVision(q, limit).catch((error: unknown) => {
         console.error('[kb-vision] 查询失败，降级为文本检索:', error instanceof Error ? error.message : error)
         return []
       }),
@@ -954,7 +949,7 @@ export class KbStore {
     if (this.searchKeywords(q, 1).length > 0) return true
     const [textHits, visionHits] = await Promise.all([
       this.searchVector(q, 1).catch(() => []),
-      hasVisionIntent(q) ? this.searchVision(q, 1).catch(() => []) : Promise.resolve([]),
+      this.searchVision(q, 1).catch(() => []),
     ])
     return textHits.length > 0 || visionHits.length > 0
   }

@@ -2,8 +2,10 @@
 import type { Pool, RowDataPacket } from 'mysql2/promise'
 import { createHash } from 'node:crypto'
 import { anyCosine, embedModelKey, embedTexts, embeddingsReady, type EmbedVector } from '../kb/embed.ts'
+import { embedVisionText, visionEmbeddingsConfigured, visionModelKey } from '../kb/vision-embed.ts'
 import { toMysqlDate } from './mysql-time.ts'
-import type { KnowledgeSearch } from '../kb/search.ts'
+import type { KnowledgeMediaSearch, KnowledgeSearch, KnowledgeVisionStatus } from '../kb/search.ts'
+import type { KbMediaRef } from '../kb/store.ts'
 
 interface KnowledgeHitRow extends RowDataPacket {
   id: number
@@ -12,6 +14,17 @@ interface KnowledgeHitRow extends RowDataPacket {
   url: string | null
   content: string
   vector_json: unknown
+}
+
+interface VisionHitRow extends RowDataPacket {
+  id: number
+  title: string
+  url: string | null
+  vector_json: unknown
+}
+
+interface CountRow extends RowDataPacket {
+  total: number
 }
 
 function parsedVector(value: unknown): EmbedVector | undefined {
@@ -41,7 +54,7 @@ function truncate(value: string, max: number): string {
 }
 
 /** MySQL-authoritative hybrid retrieval over currently effective published versions. */
-export class MysqlKnowledgeSearch implements KnowledgeSearch {
+export class MysqlKnowledgeSearch implements KnowledgeSearch, KnowledgeMediaSearch {
   constructor(private readonly pool: Pool) {}
 
   async search(query: string, limit = 5): Promise<string> {
@@ -108,6 +121,101 @@ export class MysqlKnowledgeSearch implements KnowledgeSearch {
   async hasRelevantContent(query: string): Promise<boolean> {
     const result = await this.search(query, 1)
     return !result.startsWith('未在知识库中找到') && result !== '（空查询）'
+  }
+
+  async findVisionMedia(query: string, limit = 3): Promise<KbMediaRef[]> {
+    const normalized = query.trim()
+    if (normalized === '' || !visionEmbeddingsConfigured()) return []
+    const model = visionModelKey()
+    const [rows] = await this.pool.execute<VisionHitRow[]>(`
+      SELECT a.id, d.title, v.source_url AS url, e.vector_json
+      FROM knowledge_assets a
+      JOIN knowledge_document_versions v ON v.id = a.version_id
+      JOIN knowledge_documents d ON d.id = v.document_id
+      JOIN knowledge_embeddings e
+        ON e.target_type = 'asset' AND e.target_id = a.id
+       AND e.vector_kind = 'vision' AND e.model_key = ?
+      WHERE a.asset_type = 'image' AND a.binary_data IS NOT NULL
+        AND d.publication_status = 'online'
+        AND v.status = 'published'
+        AND (v.effective_at IS NULL OR v.effective_at <= NOW(3))
+        AND (v.expires_at IS NULL OR v.expires_at > NOW(3))
+    `, [model])
+    if (rows.length === 0) return []
+    const queryVector = await this.cachedVisionQueryVector(normalized, model)
+    return rows.flatMap((row) => {
+      const vector = parsedVector(row.vector_json)
+      return vector === undefined ? [] : [{ row, score: anyCosine(queryVector, vector) }]
+    })
+      .filter(result => result.score > 0.25)
+      .sort((left, right) => right.score - left.score)
+      .slice(0, Math.max(1, Math.min(5, Math.trunc(limit))))
+      .map(({ row }) => ({ id: row.id, title: row.title, sourceUrl: row.url }))
+  }
+
+  async visionAsset(id: number): Promise<{ mime: string; image: Buffer } | undefined> {
+    const [rows] = await this.pool.execute<Array<RowDataPacket & { mime_type: string; binary_data: Buffer }>>(`
+      SELECT mime_type, binary_data FROM knowledge_assets
+      WHERE id = ? AND asset_type = 'image' AND binary_data IS NOT NULL
+    `, [id])
+    const row = rows[0]
+    return row === undefined ? undefined : { mime: row.mime_type, image: Buffer.from(row.binary_data) }
+  }
+
+  async visionStatus(): Promise<KnowledgeVisionStatus> {
+    const configured = visionEmbeddingsConfigured()
+    const model = configured ? visionModelKey() : null
+    const [assets, embeddings, cachedQueries, returnedImages] = await Promise.all([
+      this.count('SELECT COUNT(*) AS total FROM knowledge_assets WHERE asset_type = \'image\' AND binary_data IS NOT NULL'),
+      model === null ? 0 : this.count(`
+          SELECT COUNT(*) AS total FROM knowledge_embeddings
+          WHERE target_type = 'asset' AND vector_kind = 'vision' AND model_key = ?
+        `, [model]),
+      model === null ? 0 : this.count(`
+          SELECT COUNT(*) AS total FROM knowledge_query_embeddings WHERE model_key = ?
+        `, [`vision:${model}`]),
+      this.count(`
+        SELECT COUNT(*) AS total FROM conversation_messages
+        WHERE media_json IS NOT NULL AND JSON_LENGTH(media_json) > 0
+      `),
+    ])
+    return {
+      configured,
+      model,
+      assets,
+      embeddings,
+      cachedQueries,
+      returnedImages,
+    }
+  }
+
+  private async count(sql: string, parameters: Array<string | number> = []): Promise<number> {
+    const [rows] = await this.pool.execute<CountRow[]>(sql, parameters)
+    return rows[0]?.total ?? 0
+  }
+
+  private async cachedVisionQueryVector(query: string, model: string): Promise<EmbedVector> {
+    const queryHash = createHash('sha256').update(query).digest('hex')
+    const cacheModel = `vision:${model}`
+    const [rows] = await this.pool.execute<Array<RowDataPacket & { vector_json: unknown }>>(`
+      SELECT vector_json FROM knowledge_query_embeddings WHERE query_hash = ? AND model_key = ?
+    `, [queryHash, cacheModel])
+    const cached = parsedVector(rows[0]?.vector_json)
+    if (cached !== undefined) {
+      await this.pool.execute(`
+        UPDATE knowledge_query_embeddings SET last_used_at = ? WHERE query_hash = ? AND model_key = ?
+      `, [toMysqlDate(Date.now()), queryHash, cacheModel])
+      return cached
+    }
+    const computed = await embedVisionText(query)
+    const now = Date.now()
+    await this.pool.execute(`
+      INSERT INTO knowledge_query_embeddings (
+        query_hash, model_key, vector_json, created_at, last_used_at
+      ) VALUES (?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE vector_json = VALUES(vector_json), last_used_at = VALUES(last_used_at)
+    `, [queryHash, cacheModel, JSON.stringify(computed), toMysqlDate(now), toMysqlDate(now)])
+    return computed
   }
 
   private async activeChunks(): Promise<KnowledgeHitRow[]> {

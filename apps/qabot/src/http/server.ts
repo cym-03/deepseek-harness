@@ -24,7 +24,7 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { KbStore, type KbMediaRef } from '../kb/store.ts'
-import type { KnowledgeSearch } from '../kb/search.ts'
+import type { KnowledgeMediaSearch, KnowledgeSearch } from '../kb/search.ts'
 import { KbSourcesStore } from '../kb/sources.ts'
 import type { Ticket } from '../ticket/store.ts'
 import { EMPLOYEE_TICKET_MESSAGE_PREFIX, loadConversationTimeline } from '../conversation/timeline.ts'
@@ -85,6 +85,7 @@ export interface QabotHttpOptions {
   tickets: TicketRepository
   kb: KbStore
   knowledgeSearch?: KnowledgeSearch
+  knowledgeMedia?: KnowledgeMediaSearch
   staff: StaffRepository
   /** 飞书知识源配置 + 同步入口（未提供则知识源接口不可用）。 */
   sources?: KbSourcesStore
@@ -99,6 +100,7 @@ export interface QabotHttpOptions {
 export async function startHttpServer(options: QabotHttpOptions): Promise<ReturnType<typeof createServer>> {
   const { qabot, tickets, kb, staff, audit, outbox, messages, sources, syncFeishu, projectKnowledge } = options
   const knowledgeSearch = options.knowledgeSearch ?? kb
+  const knowledgeMedia = options.knowledgeMedia
   const token = process.env.QABOT_API_TOKEN
   if (token === undefined || token.trim() === '') {
     throw new Error('必须配置 QABOT_API_TOKEN（所有环境强制）。未配置时拒绝启动，防止内网机器绕过门户直接调用本服务；apps/qabot/start-qabot.bat 已内置默认令牌。')
@@ -230,11 +232,32 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
   }
 
   const attachVisionMedia = async (sessionId: string, question: string): Promise<KbMediaRef[]> => {
-    const media = await kb.findVisionMedia(question)
+    const media = knowledgeMedia === undefined
+      ? await kb.findVisionMedia(question)
+      : await knowledgeMedia.findVisionMedia(question)
     if (media.length === 0) return media
     const events = await qabot.transcript(sessionId)
     const assistant = events.findLast(event => event.type === 'assistant/message')
-    if (assistant !== undefined) kb.setConversationMedia(sessionId, assistant.seq, media)
+    if (assistant !== undefined) {
+      if (messages === undefined) {
+        kb.setConversationMedia(sessionId, assistant.seq, media)
+      } else {
+        const text = assistant.data.message.content
+          .filter(block => block.type === 'text')
+          .map(block => block.text)
+          .join('')
+        await messages.upsert([{
+          sessionId,
+          sourceType: 'dsh_event',
+          sourceId: String(assistant.seq),
+          sourceOrder: assistant.seq,
+          role: 'assistant',
+          text,
+          createdAt: assistant.time,
+          images: media,
+        }])
+      }
+    }
     return media
   }
 
@@ -903,7 +926,9 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
   })
 
   route('GET', '/api/kb/assets/<id>', async (ctx) => {
-    const asset = kb.visionAsset(Number(ctx.params.id))
+    const asset = knowledgeMedia === undefined
+      ? kb.visionAsset(Number(ctx.params.id))
+      : await knowledgeMedia.visionAsset(Number(ctx.params.id))
     if (asset === undefined) {
       send(ctx.res, 404, { error: '图片不存在' })
       return undefined
@@ -917,7 +942,9 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     return undefined
   })
 
-  route('GET', '/api/kb/vision-status', async () => kb.visionStatus())
+  route('GET', '/api/kb/vision-status', async () => knowledgeMedia === undefined
+    ? kb.visionStatus()
+    : knowledgeMedia.visionStatus())
 
   route('DELETE', '/api/conversations/<sessionId>', async (ctx) => {
     const sessionId = ctx.params.sessionId ?? ''

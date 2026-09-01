@@ -286,6 +286,7 @@ describe('KbStore embedding persistence', () => {
       sourceUrl: 'https://example.feishu.cn/wiki/policy',
     }])
     expect(await reopened.findVisionMedia('查看报销流程图')).toEqual(media)
+    expect(await reopened.findVisionMedia('财务报销要经过哪些步骤')).toEqual(media)
     expect(reopened.setPublication('wiki:policy:vision:image-1', false)).toBe(true)
     expect(await reopened.search('查看报销流程图')).toMatch(/^未在知识库中找到/)
     expect(await reopened.findVisionMedia('查看报销流程图')).toEqual([])
@@ -299,7 +300,7 @@ describe('KbStore embedding persistence', () => {
       model: expect.stringContaining('qwen3-vl-embedding'),
       assets: 1,
       embeddings: 1,
-      cachedQueries: 1,
+      cachedQueries: 2,
       returnedImages: 1,
     })
     expect(reopened.visionAsset(media[0]!.id)).toEqual({
@@ -307,8 +308,8 @@ describe('KbStore embedding persistence', () => {
       image: Buffer.from('image-one'),
     })
     reopened.dispose()
-    // 一次图片嵌入、一次问题嵌入；相同问题的后续检索全部复用持久缓存。
-    expect(fetchMock).toHaveBeenCalledTimes(2)
+    // 一次图片嵌入、两个不同问题的查询嵌入；相同问题的后续检索全部复用持久缓存。
+    expect(fetchMock).toHaveBeenCalledTimes(3)
   })
 
   it('caps new visual embeddings per synchronization run', async () => {
