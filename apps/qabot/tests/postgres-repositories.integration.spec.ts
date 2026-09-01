@@ -56,7 +56,7 @@ describePostgres('PostgreSQL Repository integration', () => {
       expect(await tickets.reply(ticket.id, '已处理', accepted.version)).toBeTypeOf('number')
       const replied = await tickets.get(ticket.id)
       if (replied === undefined) throw new Error('expected replied ticket')
-      expect(await tickets.close(ticket.id, null, replied.version)).toBe(true)
+      expect(await tickets.closeStaleConversations(Date.now() + 1)).toBeGreaterThanOrEqual(1)
       const closed = await tickets.get(ticket.id)
       if (closed === undefined) throw new Error('expected closed ticket')
       expect(await tickets.rate(ticket.id, 5, closed.version)).toBe(true)

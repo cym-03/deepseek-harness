@@ -440,12 +440,14 @@ export class PostgresTicketRepository implements TicketRepository {
     `
   }
 
-  async closeStaleOpen(cutoff: number): Promise<number> {
+  async closeStaleConversations(cutoff: number): Promise<number> {
     const now = Date.now()
     const rows = await this.sql<Array<{ id: number }>>`
       UPDATE tickets SET status = 'closed', service_end = COALESCE(service_end, ${now}),
         updated_at = ${now}, version = version + 1
-      WHERE status = 'open' AND updated_at <= ${cutoff}
+      WHERE updated_at <= ${cutoff}
+        AND ((kind = 'ai' AND status = 'open')
+          OR status IN ('in_service', 'waiting_employee', 'reopened'))
       RETURNING id
     `
     return rows.length

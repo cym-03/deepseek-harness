@@ -292,12 +292,14 @@ export class TicketStore implements TicketRepository {
     `).run(Date.now(), sessionId)
   }
 
-  /** Closes AI-only tickets whose conversations have been inactive since the cutoff. */
-  closeStaleOpen(cutoff: number): number {
+  /** Closes inactive AI conversations and accepted human-service conversations. */
+  closeStaleConversations(cutoff: number): number {
     const result = this.db.prepare(`
       UPDATE tickets
       SET status = 'closed', service_end = COALESCE(service_end, ?), updated_at = ?, version = version + 1
-      WHERE status = 'open' AND updated_at <= ?
+      WHERE updated_at <= ?
+        AND ((kind = 'ai' AND status = 'open')
+          OR status IN ('in_service', 'waiting_employee', 'reopened'))
     `).run(Date.now(), Date.now(), cutoff)
     return Number(result.changes)
   }

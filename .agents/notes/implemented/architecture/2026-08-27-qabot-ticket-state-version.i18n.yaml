@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-27-qabot-ticket-state-version.md
-2026-08-27-qabot-ticket-state-version.md: cab344ca7436de08a0f15ce8699ab35b5f964874
-2026-08-27-qabot-ticket-state-version.zh.md: 69352400621d7129bf774755606e070675302e6f
+2026-08-27-qabot-ticket-state-version.md: 95c36144fd3777c3997b18a53f85a5c79cf53a2c
+2026-08-27-qabot-ticket-state-version.zh.md: bbe369cda2be911bcf5155c1ff219adda9d3701e

@@ -75,16 +75,27 @@ describe('ticket migrations and concurrency', () => {
     }
   })
 
-  it('auto-closes only stale AI-service tickets', () => {
+  it('auto-closes stale AI and accepted human conversations but keeps unaccepted handoffs', () => {
     const store = new TicketStore(':memory:')
     try {
       const ai = store.ensureOpen({ sessionId: 'ai-session', userKey: 'employee-1', question: 'policy' })
-      const human = store.ensureOpen({ sessionId: 'human-session', userKey: 'employee-2', question: 'help' })
-      store.markHandoff(human.sessionId, '需要人工', '人事')
+      const waiting = store.ensureOpen({ sessionId: 'waiting-session', userKey: 'employee-2', question: 'help' })
+      store.markHandoff(waiting.sessionId, '需要人工', '人事')
+      const accepted = store.ensureOpen({ sessionId: 'accepted-session', userKey: 'employee-3', question: 'help' })
+      store.markHandoff(accepted.sessionId, '需要人工', 'IT')
+      expect(store.accept(accepted.id, 'agent-1')).toBe(true)
+      const replied = store.ensureOpen({ sessionId: 'replied-session', userKey: 'employee-4', question: 'help' })
+      store.markHandoff(replied.sessionId, '需要人工', '行政')
+      expect(store.accept(replied.id, 'agent-2')).toBe(true)
+      const repliedAccepted = store.get(replied.id)
+      if (repliedAccepted === undefined) throw new Error('expected accepted ticket')
+      expect(store.reply(replied.id, '请确认处理结果', repliedAccepted.version)).toBeTypeOf('number')
 
-      expect(store.closeStaleOpen(Date.now() + 1)).toBe(1)
+      expect(store.closeStaleConversations(Date.now() + 1)).toBe(3)
       expect(store.get(ai.id)?.status).toBe('closed')
-      expect(store.get(human.id)?.status).toBe('waiting_agent')
+      expect(store.get(waiting.id)?.status).toBe('waiting_agent')
+      expect(store.get(accepted.id)?.status).toBe('closed')
+      expect(store.get(replied.id)?.status).toBe('closed')
     } finally {
       store.dispose()
     }

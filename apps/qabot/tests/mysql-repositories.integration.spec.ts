@@ -65,6 +65,8 @@ describeMysql('MySQL Repository integration', () => {
       const accepted = await tickets.get(ticket.id)
       if (accepted === undefined) throw new Error('expected accepted ticket')
       expect(await tickets.reply(ticket.id, '已处理', accepted.version)).toBeTypeOf('number')
+      expect(await tickets.closeStaleConversations(Date.now() + 1)).toBeGreaterThanOrEqual(1)
+      expect(await tickets.get(ticket.id)).toMatchObject({ status: 'closed' })
 
       const outbox = new MysqlOutboxRepository(pool)
       expect(await outbox.enqueue(outboxKey, 'ticket.handoff', { ticketId: ticket.id })).toBe(true)

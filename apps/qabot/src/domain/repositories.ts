@@ -75,7 +75,7 @@ export interface TicketRepository {
   reply(ticketId: number, message: string, expectedVersion: number): Awaitable<number | undefined>
   transfer(ticketId: number, toGroup: string, note: string | null, expectedVersion?: number): Awaitable<boolean>
   resolve(sessionId: string): Awaitable<void>
-  closeStaleOpen(cutoff: number): Awaitable<number>
+  closeStaleConversations(cutoff: number): Awaitable<number>
   close(ticketId: number, satisfaction: number | null, expectedVersion?: number): Awaitable<boolean>
   rate(ticketId: number, satisfaction: number, expectedVersion?: number): Awaitable<boolean>
   findPendingRating(userKey: string): Awaitable<Ticket | undefined>

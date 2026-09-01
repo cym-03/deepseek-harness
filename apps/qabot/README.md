@@ -115,14 +115,14 @@ DEEPSEEK_BASE_URL=http://<relay>/v1 node --import tsx/esm apps/qabot/src/bin.ts 
 | `QABOT_IDENTITY_SECRET` | required | Verifies short-lived portal identities; never commit it |
 | `QABOT_MAX_BODY_BYTES` | 1048576 | Maximum HTTP request body size |
 | `QABOT_MAX_MESSAGE_LENGTH` | 8000 | Maximum employee message length |
-| `QABOT_IDLE_CONVERSATION_MS` | 3600000 | Idle timeout for AI-only tickets |
-| `QABOT_IDLE_SWEEP_MS` | 60000 | AI-only ticket timeout scan interval |
+| `QABOT_IDLE_CONVERSATION_MS` | 3600000 | Idle timeout for AI and accepted human conversations |
+| `QABOT_IDLE_SWEEP_MS` | 60000 | Idle conversation scan interval |
 | `QABOT_OUTBOX_INTERVAL_MS` | 1000 | External-notification polling interval, minimum 100 ms |
 | `QABOT_DATABASE_URL` | none | PostgreSQL URL; use database `hr_system` |
 | `QABOT_DATABASE_BACKEND` | sqlite | Business repository: `sqlite`, `mysql`, or `postgres` |
 | `QABOT_MYSQL_URL` | none | Required when the business repository is MySQL |
 
-The service desk presents four states: pending, waiting for acceptance, processing, and completed. AI-only tickets remain pending, are visible only to supervisors, and complete after the idle timeout. A human handoff enters the selected group's shared waiting queue and notifies every active group member without choosing an assignee. The first member to accept owns the ticket. A later transfer selects both a service group and a specific member.
+The service desk presents four states: pending, waiting for acceptance, processing, and completed. AI-only tickets remain pending and are visible only to supervisors. An idle AI conversation or accepted human conversation completes after the idle timeout and immediately exposes employee rating controls. An unaccepted human handoff remains in the selected group's shared waiting queue and notifies every active group member without choosing an assignee. The first member to accept owns the ticket. A later transfer selects both a service group and a specific member.
 
 Ticket responses contain a monotonically increasing `version`. Agent mutations submit the most recently read version; a stale version or invalid state returns HTTP 409 so the client can refresh before deciding whether to retry.
 

@@ -556,11 +556,12 @@ export class MysqlTicketRepository implements TicketRepository {
       [Date.now(), sessionId])
   }
 
-  async closeStaleOpen(cutoff: number): Promise<number> {
+  async closeStaleConversations(cutoff: number): Promise<number> {
     const now = Date.now()
     const [result] = await this.pool.execute<ResultSetHeader>(`UPDATE tickets SET status = 'closed',
       service_end = COALESCE(service_end, ?), updated_at = ?, version = version + 1
-      WHERE status = 'open' AND updated_at <= ?`, [now, now, cutoff])
+      WHERE updated_at <= ? AND ((kind = 'ai' AND status = 'open')
+        OR status IN ('in_service', 'waiting_employee', 'reopened'))`, [now, now, cutoff])
     return result.affectedRows
   }
 

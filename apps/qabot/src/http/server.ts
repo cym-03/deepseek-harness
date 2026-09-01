@@ -114,7 +114,7 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
   }
   interface LiveChange {
     revision: number
-    employeeId: string
+    employeeId: string | null
     groups: string[]
     assignees: string[]
   }
@@ -131,7 +131,17 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
       assignees: [...new Set([ticket.assignee, previous?.assignee].filter(assignee => assignee !== null && assignee !== undefined))],
     } satisfies LiveChange)
   }
+  const publishTicketSweepChange = (): void => {
+    liveRevision += 1
+    liveChanges.emit('change', {
+      revision: liveRevision,
+      employeeId: null,
+      groups: [],
+      assignees: [],
+    } satisfies LiveChange)
+  }
   const canReceiveChange = (identity: PortalIdentity, change: LiveChange): boolean => {
+    if (change.employeeId === null) return true
     if (hasRole(identity, ['SystemAdmin'])) return true
     if (isServiceDeskUser(identity)) {
       return change.groups.some(group => identity.departmentIds.includes(group))
@@ -1417,8 +1427,11 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
   })
 
   const closeIdleConversations = async (): Promise<void> => {
-    const count = await tickets.closeStaleOpen(Date.now() - idleConversationMs)
-    if (count > 0) console.log(`[ticket] 已自动结束 ${count} 个超过空闲时限的智能会话`)
+    const count = await tickets.closeStaleConversations(Date.now() - idleConversationMs)
+    if (count > 0) {
+      publishTicketSweepChange()
+      console.log(`[ticket] 已自动结束 ${count} 个超过空闲时限的会话`)
+    }
   }
   await closeIdleConversations()
   const idleTimer = setInterval(() => {

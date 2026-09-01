@@ -115,14 +115,14 @@ DEEPSEEK_BASE_URL=http://<relay>/v1 node --import tsx/esm apps/qabot/src/bin.ts 
 | `QABOT_IDENTITY_SECRET` | 必填 | 校验门户短时签名身份令牌；不得提交到仓库 |
 | `QABOT_MAX_BODY_BYTES` | 1048576 | HTTP 请求体上限 |
 | `QABOT_MAX_MESSAGE_LENGTH` | 8000 | 单条员工消息字符上限 |
-| `QABOT_IDLE_CONVERSATION_MS` | 3600000 | 纯智能工单无活动后自动完成的时限 |
-| `QABOT_IDLE_SWEEP_MS` | 60000 | 空闲纯智能工单检查间隔 |
+| `QABOT_IDLE_CONVERSATION_MS` | 3600000 | 智能会话和已接单人工会话的空闲完成时限 |
+| `QABOT_IDLE_SWEEP_MS` | 60000 | 空闲会话检查间隔 |
 | `QABOT_OUTBOX_INTERVAL_MS` | 1000 | 外部通知队列轮询间隔，最小 100 毫秒 |
 | `QABOT_DATABASE_URL` | 无 | PostgreSQL 连接 URL，数据库名使用 `hr_system` |
 | `QABOT_DATABASE_BACKEND` | sqlite | 业务数据后端；可选 `sqlite`、`mysql` 或 `postgres` |
 | `QABOT_MYSQL_URL` | 无 | MySQL 连接 URL；MySQL 后端必填 |
 
-工单后台统一显示待处理、待接单、处理中和已完成。纯智能工单处于待处理，仅主管可见；超过空闲时限后自动进入已完成。转人工工单进入所选服务组的共享待接单队列，不预设处理人，并通知该组全部已启用服务人员；第一位接单人取得工单。后续客服转接仍须选择目标服务组及该组具体人员。
+工单后台统一显示待处理、待接单、处理中和已完成。纯智能工单处于待处理且仅主管可见；纯智能会话或已接单人工会话超过空闲时限后自动进入已完成，员工页面立即显示评分控件。尚未接单的转人工工单继续留在所选服务组的共享待接单队列，不因空闲超时关闭，并通知该组全部已启用服务人员；第一位接单人取得工单。后续客服转接仍须选择目标服务组及该组具体人员。
 
 工单响应包含单调递增的 `version`。客服修改接口必须回传最近读取的版本；版本过期或状态不允许时返回 HTTP 409，前端应刷新工单后再决定是否重试。
 
