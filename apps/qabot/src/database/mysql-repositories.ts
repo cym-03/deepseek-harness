@@ -14,13 +14,14 @@ import type {
 } from '../domain/repositories.ts'
 import type { OutboxEventType, OutboxMessage } from '../integration/outbox.ts'
 import type { Ticket, TicketKind, TicketStatus } from '../ticket/store.ts'
+import { fromMysqlDate, type MysqlDateValue, toMysqlDate } from './mysql-time.ts'
 
 interface ConversationRow extends RowDataPacket {
   user_key: string
   session_id: string
   title: string
-  created_at: number
-  last_message_at: number
+  created_at: MysqlDateValue
+  last_message_at: MysqlDateValue
   message_count: number
 }
 
@@ -29,8 +30,8 @@ function toConversation(row: ConversationRow): Conversation {
     userKey: row.user_key,
     sessionId: row.session_id,
     title: row.title,
-    createdAt: row.created_at,
-    lastMessageAt: row.last_message_at,
+    createdAt: fromMysqlDate(row.created_at),
+    lastMessageAt: fromMysqlDate(row.last_message_at),
     messageCount: row.message_count,
   }
 }
@@ -44,7 +45,7 @@ export class MysqlConversationRepository implements ConversationRepository {
       INSERT INTO conversations (user_key, session_id, title, created_at, last_message_at, message_count)
       VALUES (?, ?, '新对话', ?, ?, 0)
       ON DUPLICATE KEY UPDATE session_id = VALUES(session_id)
-    `, [userKey, sessionId, now, now])
+    `, [userKey, sessionId, toMysqlDate(now), toMysqlDate(now)])
   }
 
   async touch(userKey: string, sessionId: string, messageCount: number, firstQuestion?: string): Promise<void> {
@@ -53,7 +54,7 @@ export class MysqlConversationRepository implements ConversationRepository {
       SET title = CASE WHEN message_count = 0 AND ? IS NOT NULL THEN ? ELSE title END,
           last_message_at = ?, message_count = ?
       WHERE user_key = ? AND session_id = ?
-    `, [firstQuestion ?? null, firstQuestion ?? null, Date.now(), messageCount, userKey, sessionId])
+    `, [firstQuestion ?? null, firstQuestion ?? null, toMysqlDate(Date.now()), messageCount, userKey, sessionId])
   }
 
   async findEmpty(userKey: string): Promise<Conversation | undefined> {
@@ -93,7 +94,7 @@ export class MysqlConversationRepository implements ConversationRepository {
     const [result] = await this.pool.execute<ResultSetHeader>(`
       UPDATE conversations SET archived_at = ?
       WHERE user_key = ? AND session_id = ? AND archived_at IS NULL
-    `, [Date.now(), userKey, sessionId])
+    `, [toMysqlDate(Date.now()), userKey, sessionId])
     return result.affectedRows > 0
   }
 }
@@ -107,7 +108,7 @@ interface ConversationMessageRow extends RowDataPacket {
   role: ConversationMessage['role']
   content: string
   media_json: unknown
-  created_at: number
+  created_at: MysqlDateValue
 }
 
 function parseMessageImages(value: unknown): ConversationMessage['images'] {
@@ -142,8 +143,8 @@ export class MysqlConversationMessageRepository implements ConversationMessageRe
           message.role,
           message.text,
           message.images === undefined ? null : JSON.stringify(message.images),
-          message.createdAt,
-          projectedAt,
+          toMysqlDate(message.createdAt),
+          toMysqlDate(projectedAt),
         ])
       }
       await connection.commit()
@@ -167,10 +168,10 @@ export class MysqlConversationMessageRepository implements ConversationMessageRe
         sessionId: row.session_id,
         sourceType: row.source_type,
         sourceId: row.source_id,
-        sourceOrder: Number(row.source_order),
+        sourceOrder: row.source_order,
         role: row.role,
         text: row.content,
-        createdAt: Number(row.created_at),
+        createdAt: fromMysqlDate(row.created_at),
         ...(images === undefined ? {} : { images }),
       }
     })
@@ -192,7 +193,7 @@ export class MysqlConversationMessageRepository implements ConversationMessageRe
       ON DUPLICATE KEY UPDATE
         last_read_message_id = GREATEST(last_read_message_id, VALUES(last_read_message_id)),
         updated_at = VALUES(updated_at)
-    `, [sessionId, readerKey, throughMessageId, Date.now()])
+    `, [sessionId, readerKey, throughMessageId, toMysqlDate(Date.now())])
   }
 
   async unreadCounts(
@@ -214,7 +215,7 @@ export class MysqlConversationMessageRepository implements ConversationMessageRe
         AND messages.id > COALESCE(reader_progress.last_read_message_id, baseline.last_message_id)
       GROUP BY messages.session_id
     `, [readerKey, ...sessionIds, ...roles])
-    return new Map(rows.map(row => [row.session_id, Number(row.unread_count)]))
+    return new Map(rows.map(row => [row.session_id, row.unread_count]))
   }
 }
 
@@ -225,7 +226,7 @@ interface AuditRow extends RowDataPacket {
   resource_type: string
   resource_id: string
   detail: string | null
-  created_at: number
+  created_at: MysqlDateValue
 }
 
 function toAudit(row: AuditRow): AuditRecord {
@@ -236,7 +237,7 @@ function toAudit(row: AuditRow): AuditRecord {
     resourceType: row.resource_type,
     resourceId: row.resource_id,
     detail: row.detail,
-    createdAt: row.created_at,
+    createdAt: fromMysqlDate(row.created_at),
   }
 }
 
@@ -248,7 +249,7 @@ export class MysqlAuditRepository implements AuditRepository {
     const [result] = await this.pool.execute<ResultSetHeader>(`
       INSERT INTO audit_records (actor_id, action, resource_type, resource_id, detail, created_at)
       VALUES (?, ?, ?, ?, ?, ?)
-    `, [input.actorId, input.action, input.resourceType, input.resourceId, input.detail, createdAt])
+    `, [input.actorId, input.action, input.resourceType, input.resourceId, input.detail, toMysqlDate(createdAt)])
     return { id: result.insertId, ...input, createdAt }
   }
 
@@ -305,7 +306,7 @@ export class MysqlOutboxRepository implements OutboxRepository {
         INSERT INTO outbox_messages
           (idempotency_key, event_type, payload_json, available_at, created_at)
         VALUES (?, ?, ?, ?, ?)
-      `, [idempotencyKey, type, JSON.stringify(payload), now, now])
+      `, [idempotencyKey, type, JSON.stringify(payload), toMysqlDate(now), toMysqlDate(now)])
       return true
     } catch (error) {
       if (isDuplicateKeyError(error)) return false
@@ -320,19 +321,19 @@ export class MysqlOutboxRepository implements OutboxRepository {
       await connection.execute(`
         UPDATE outbox_messages SET status = 'pending', claimed_at = NULL, claimed_by = NULL
         WHERE status = 'processing' AND claimed_at < ?
-      `, [now - this.leaseMs])
+      `, [toMysqlDate(now - this.leaseMs)])
       const safeLimit = Math.max(1, Math.min(100, Math.trunc(limit)))
       const [rows] = await connection.query<OutboxRow[]>(`
         SELECT id, idempotency_key, event_type, payload_json, attempts
         FROM outbox_messages WHERE status = 'pending' AND available_at <= ?
         ORDER BY id LIMIT ${safeLimit} FOR UPDATE SKIP LOCKED
-      `, [now])
+      `, [toMysqlDate(now)])
       if (rows.length > 0) {
         const placeholders = rows.map(() => '?').join(', ')
         await connection.execute(`
           UPDATE outbox_messages SET status = 'processing', claimed_at = ?, claimed_by = ?
           WHERE id IN (${placeholders})
-        `, [now, this.workerId, ...rows.map(row => row.id)])
+        `, [toMysqlDate(now), this.workerId, ...rows.map(row => row.id)])
       }
       await connection.commit()
       connection.release()
@@ -348,7 +349,7 @@ export class MysqlOutboxRepository implements OutboxRepository {
       UPDATE outbox_messages SET status = 'completed', completed_at = ?, last_error = NULL,
         claimed_at = NULL, claimed_by = NULL
       WHERE id = ? AND status = 'processing' AND claimed_by = ?
-    `, [Date.now(), id, this.workerId])
+    `, [toMysqlDate(Date.now()), id, this.workerId])
   }
 
   async retry(id: number, error: string, delayMs: number, maxAttempts: number): Promise<void> {
@@ -358,7 +359,7 @@ export class MysqlOutboxRepository implements OutboxRepository {
           status = CASE WHEN attempts + 1 >= ? THEN 'failed' ELSE 'pending' END,
           available_at = ?, last_error = ?, claimed_at = NULL, claimed_by = NULL
       WHERE id = ? AND status = 'processing' AND claimed_by = ?
-    `, [maxAttempts, Date.now() + delayMs, error.slice(0, 2_000), id, this.workerId])
+    `, [maxAttempts, toMysqlDate(Date.now() + delayMs), error.slice(0, 2_000), id, this.workerId])
   }
 
   async count(status: 'pending' | 'completed' | 'failed'): Promise<number> {
@@ -379,12 +380,12 @@ interface TicketRow extends RowDataPacket {
   department: string | null
   assignee: string | null
   question: string
-  service_start: number | null
-  service_end: number | null
+  service_start: MysqlDateValue | null
+  service_end: MysqlDateValue | null
   satisfaction: number | null
   handoff_reason: string | null
-  created_at: number
-  updated_at: number
+  created_at: MysqlDateValue
+  updated_at: MysqlDateValue
   version: number
 }
 
@@ -392,16 +393,16 @@ function toTicket(row: TicketRow): Ticket {
   return {
     id: row.id, sessionId: row.session_id, userKey: row.user_key, kind: row.kind, status: row.status,
     department: row.department, assignee: row.assignee, question: row.question,
-    serviceStart: row.service_start, serviceEnd: row.service_end, satisfaction: row.satisfaction,
+    serviceStart: fromMysqlDate(row.service_start), serviceEnd: fromMysqlDate(row.service_end), satisfaction: row.satisfaction,
     handoffReason: row.handoff_reason,
-    createdAt: row.created_at, updatedAt: row.updated_at, version: row.version,
+    createdAt: fromMysqlDate(row.created_at), updatedAt: fromMysqlDate(row.updated_at), version: row.version,
   }
 }
 
-interface ReplyRow extends RowDataPacket { id: number; message: string; created_at: number }
+interface ReplyRow extends RowDataPacket { id: number; message: string; created_at: MysqlDateValue }
 
 function toReply(row: ReplyRow): { id: number; message: string; createdAt: number } {
-  return { id: row.id, message: row.message, createdAt: row.created_at }
+  return { id: row.id, message: row.message, createdAt: fromMysqlDate(row.created_at) }
 }
 
 /** MySQL ticket projection with transactional reply writes and optimistic updates. */
@@ -422,7 +423,7 @@ export class MysqlTicketRepository implements TicketRepository {
 
   async addReply(ticketId: number, message: string): Promise<number> {
     const [result] = await this.pool.execute<ResultSetHeader>(
-      'INSERT INTO ticket_replies (ticket_id, message, created_at) VALUES (?, ?, ?)', [ticketId, message, Date.now()],
+      'INSERT INTO ticket_replies (ticket_id, message, created_at) VALUES (?, ?, ?)', [ticketId, message, toMysqlDate(Date.now())],
     )
     return result.insertId
   }
@@ -461,12 +462,12 @@ export class MysqlTicketRepository implements TicketRepository {
       let ticketId: number
       if (row !== undefined && row.status !== 'closed' && row.status !== 'resolved') {
         ticketId = row.id
-        await connection.execute('UPDATE tickets SET updated_at = ? WHERE id = ?', [Date.now(), ticketId])
+        await connection.execute('UPDATE tickets SET updated_at = ? WHERE id = ?', [toMysqlDate(Date.now()), ticketId])
       } else {
         const now = Date.now()
         const [result] = await connection.execute<ResultSetHeader>(
           'INSERT INTO tickets (session_id, user_key, question, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
-          [input.sessionId, input.userKey, input.question, now, now],
+          [input.sessionId, input.userKey, input.question, toMysqlDate(now), toMysqlDate(now)],
         )
         ticketId = result.insertId
       }
@@ -485,31 +486,31 @@ export class MysqlTicketRepository implements TicketRepository {
   async openService(sessionId: string): Promise<void> {
     const now = Date.now()
     await this.pool.execute(`UPDATE tickets SET service_start = COALESCE(service_start, ?), updated_at = ?
-      WHERE session_id = ? AND status IN ('open', 'waiting_agent', 'reopened')`, [now, now, sessionId])
+      WHERE session_id = ? AND status IN ('open', 'waiting_agent', 'reopened')`, [toMysqlDate(now), toMysqlDate(now), sessionId])
   }
 
   async closeService(sessionId: string): Promise<void> {
     const now = Date.now()
     await this.pool.execute('UPDATE tickets SET service_end = ?, updated_at = ? WHERE session_id = ? AND service_end IS NULL',
-      [now, now, sessionId])
+      [toMysqlDate(now), toMysqlDate(now), sessionId])
   }
 
   async markHandoff(sessionId: string, reason: string, group?: string): Promise<void> {
     await this.pool.execute(`UPDATE tickets SET status = 'waiting_agent', handoff_reason = ?,
       department = COALESCE(?, department), updated_at = ?, version = version + 1 WHERE session_id = ?`,
-    [reason, group ?? null, Date.now(), sessionId])
+    [reason, group ?? null, toMysqlDate(Date.now()), sessionId])
   }
 
   async assign(ticketId: number, assignee: string, department: string | null): Promise<void> {
     await this.pool.execute("UPDATE tickets SET assignee = ?, department = ?, kind = 'human', updated_at = ? WHERE id = ?",
-      [assignee, department, Date.now(), ticketId])
+      [assignee, department, toMysqlDate(Date.now()), ticketId])
   }
 
   async accept(ticketId: number, assignee: string, expectedVersion?: number): Promise<boolean> {
     const versionClause = expectedVersion === undefined ? '' : ' AND version = ?'
     const values = expectedVersion === undefined
-      ? [assignee, Date.now(), ticketId]
-      : [assignee, Date.now(), ticketId, expectedVersion]
+      ? [assignee, toMysqlDate(Date.now()), ticketId]
+      : [assignee, toMysqlDate(Date.now()), ticketId, expectedVersion]
     const [result] = await this.pool.execute<ResultSetHeader>(`UPDATE tickets SET status = 'in_service', assignee = ?,
       kind = 'human', updated_at = ?, version = version + 1
       WHERE id = ? AND status IN ('waiting_agent', 'open', 'reopened')${versionClause}`, values)
@@ -522,14 +523,14 @@ export class MysqlTicketRepository implements TicketRepository {
     try {
       const [updated] = await connection.execute<ResultSetHeader>(`UPDATE tickets SET status = 'waiting_employee',
         updated_at = ?, version = version + 1 WHERE id = ? AND version = ?
-        AND status IN ('in_service', 'waiting_employee')`, [Date.now(), ticketId, expectedVersion])
+        AND status IN ('in_service', 'waiting_employee')`, [toMysqlDate(Date.now()), ticketId, expectedVersion])
       if (updated.affectedRows === 0) {
         await connection.commit()
         connection.release()
         return undefined
       }
       const [reply] = await connection.execute<ResultSetHeader>(
-        'INSERT INTO ticket_replies (ticket_id, message, created_at) VALUES (?, ?, ?)', [ticketId, message, Date.now()],
+        'INSERT INTO ticket_replies (ticket_id, message, created_at) VALUES (?, ?, ?)', [ticketId, message, toMysqlDate(Date.now())],
       )
       await connection.commit()
       connection.release()
@@ -543,8 +544,8 @@ export class MysqlTicketRepository implements TicketRepository {
   async transfer(ticketId: number, toGroup: string, note: string | null, expectedVersion?: number): Promise<boolean> {
     const versionClause = expectedVersion === undefined ? '' : ' AND version = ?'
     const values = expectedVersion === undefined
-      ? [toGroup, note ?? `转接到${toGroup}`, Date.now(), ticketId]
-      : [toGroup, note ?? `转接到${toGroup}`, Date.now(), ticketId, expectedVersion]
+      ? [toGroup, note ?? `转接到${toGroup}`, toMysqlDate(Date.now()), ticketId]
+      : [toGroup, note ?? `转接到${toGroup}`, toMysqlDate(Date.now()), ticketId, expectedVersion]
     const [result] = await this.pool.execute<ResultSetHeader>(`UPDATE tickets SET department = ?, assignee = NULL,
       status = 'waiting_agent', handoff_reason = COALESCE(?, handoff_reason), updated_at = ?, version = version + 1
       WHERE id = ? AND status IN ('open', 'waiting_agent', 'in_service', 'waiting_employee', 'reopened')${versionClause}`, values)
@@ -553,7 +554,7 @@ export class MysqlTicketRepository implements TicketRepository {
 
   async resolve(sessionId: string): Promise<void> {
     await this.pool.execute("UPDATE tickets SET status = 'resolved', updated_at = ?, version = version + 1 WHERE session_id = ? AND status = 'open'",
-      [Date.now(), sessionId])
+      [toMysqlDate(Date.now()), sessionId])
   }
 
   async closeStaleConversations(cutoff: number): Promise<number> {
@@ -561,14 +562,14 @@ export class MysqlTicketRepository implements TicketRepository {
     const [result] = await this.pool.execute<ResultSetHeader>(`UPDATE tickets SET status = 'closed',
       service_end = COALESCE(service_end, ?), updated_at = ?, version = version + 1
       WHERE updated_at <= ? AND ((kind = 'ai' AND status = 'open')
-        OR status IN ('in_service', 'waiting_employee', 'reopened'))`, [now, now, cutoff])
+        OR status IN ('in_service', 'waiting_employee', 'reopened'))`, [toMysqlDate(now), toMysqlDate(now), toMysqlDate(cutoff)])
     return result.affectedRows
   }
 
   async close(ticketId: number, satisfaction: number | null, expectedVersion?: number): Promise<boolean> {
     return await this.updateWithOptionalVersion(
       'UPDATE tickets SET status = \'closed\', satisfaction = ?, updated_at = ?, version = version + 1 WHERE id = ?',
-      [satisfaction, Date.now(), ticketId], expectedVersion,
+      [satisfaction, toMysqlDate(Date.now()), ticketId], expectedVersion,
     )
   }
 
@@ -576,7 +577,7 @@ export class MysqlTicketRepository implements TicketRepository {
     const suffix = expectedVersion === undefined ? '' : " AND status IN ('resolved', 'closed') AND satisfaction IS NULL"
     return await this.updateWithOptionalVersion(
       `UPDATE tickets SET satisfaction = ?, updated_at = ?, version = version + 1 WHERE id = ?${suffix}`,
-      [satisfaction, Date.now(), ticketId], expectedVersion,
+      [satisfaction, toMysqlDate(Date.now()), ticketId], expectedVersion,
     )
   }
 
@@ -612,8 +613,10 @@ export class MysqlTicketRepository implements TicketRepository {
       avg_service_ms: number | null
       avg_satisfaction: number | null
     }>>(`SELECT COUNT(*) AS count, SUM(status = 'waiting_agent') AS handoff_count,
-      SUM(status IN ('resolved', 'closed')) AS resolved_count, AVG(service_end - service_start) AS avg_service_ms,
-      AVG(satisfaction) AS avg_satisfaction FROM tickets WHERE (? IS NULL OR created_at >= ?)`, [since ?? null, since ?? null])
+      SUM(status IN ('resolved', 'closed')) AS resolved_count,
+      AVG(TIMESTAMPDIFF(MICROSECOND, service_start, service_end) / 1000) AS avg_service_ms,
+      AVG(satisfaction) AS avg_satisfaction FROM tickets WHERE (? IS NULL OR created_at >= ?)`,
+    [toMysqlDate(since ?? null), toMysqlDate(since ?? null)])
     const row = rows[0]
     if (row === undefined) throw new Error('MySQL 工单统计失败')
     return { count: row.count, handoffCount: row.handoff_count, resolvedCount: row.resolved_count,
@@ -622,7 +625,7 @@ export class MysqlTicketRepository implements TicketRepository {
 
   private async updateWithOptionalVersion(
     sql: string,
-    values: Array<string | number | null>,
+    values: Array<string | number | Date | null>,
     expectedVersion?: number,
   ): Promise<boolean> {
     const statement = expectedVersion === undefined ? sql : `${sql} AND version = ?`

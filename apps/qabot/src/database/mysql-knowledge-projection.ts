@@ -6,10 +6,11 @@ import type {
   KnowledgeStorageSnapshot,
   KnowledgeStorageVersion,
 } from '../kb/store.ts'
+import { toMysqlDate } from './mysql-time.ts'
 
 interface IdRow extends RowDataPacket { id: number }
 interface NumberRow extends RowDataPacket { value: number }
-type SqlValue = string | number | null | Buffer
+type SqlValue = string | number | Date | null | Buffer
 
 /** Counts written by one complete knowledge projection. */
 export interface KnowledgeProjectionResult {
@@ -47,7 +48,7 @@ async function sourceId(connection: PoolConnection, document: KnowledgeStorageDo
       source_type, source_key, name, source_url, owner_employee_id, enabled, created_at, updated_at
     ) VALUES (?, ?, ?, ?, NULL, 1, ?, ?)
     ON DUPLICATE KEY UPDATE name = VALUES(name), source_url = VALUES(source_url), updated_at = VALUES(updated_at)
-  `, [sourceType(document.source), document.source, document.title, document.url, now, now])
+  `, [sourceType(document.source), document.source, document.title, document.url, toMysqlDate(now), toMysqlDate(now)])
   const id = await findId(connection, 'SELECT id FROM knowledge_sources WHERE source_key = ?', [document.source])
   if (id === undefined) throw new Error(`知识来源投影失败：${document.source}`)
   return id
@@ -66,7 +67,8 @@ async function documentId(
     ) VALUES (?, ?, ?, NULL, 'internal', ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE title = VALUES(title), publication_status = VALUES(publication_status),
       publication_updated_at = VALUES(publication_updated_at), updated_at = VALUES(updated_at)
-  `, [sourceIdValue, document.source, document.title, document.online ? 'online' : 'offline', now, now, now])
+  `, [sourceIdValue, document.source, document.title, document.online ? 'online' : 'offline',
+    toMysqlDate(now), toMysqlDate(now), toMysqlDate(now)])
   const id = await findId(connection, `
     SELECT id FROM knowledge_documents WHERE source_id = ? AND external_document_key = ?
   `, [sourceIdValue, document.source])
@@ -89,11 +91,11 @@ async function ensureVersion(
     `, [
       version.status,
       version.url,
-      version.effectiveAt,
-      version.expiresAt,
+      toMysqlDate(version.effectiveAt),
+      toMysqlDate(version.expiresAt),
       version.reviewedBy,
-      version.publishedAt,
-      version.status === 'archived' ? Date.now() : null,
+      toMysqlDate(version.publishedAt),
+      toMysqlDate(version.status === 'archived' ? Date.now() : null),
       existing,
     ])
     return existing
@@ -113,12 +115,12 @@ async function ensureVersion(
     version.status,
     version.contentHash,
     version.url,
-    version.effectiveAt,
-    version.expiresAt,
+    toMysqlDate(version.effectiveAt),
+    toMysqlDate(version.expiresAt),
     version.reviewedBy,
-    version.createdAt,
-    version.publishedAt,
-    version.status === 'archived' ? Date.now() : null,
+    toMysqlDate(version.createdAt),
+    toMysqlDate(version.publishedAt),
+    toMysqlDate(version.status === 'archived' ? Date.now() : null),
   ])
   return result.insertId
 }
@@ -144,7 +146,7 @@ async function replaceVersionChunks(
       INSERT INTO knowledge_chunks (
         version_id, chunk_no, content, content_hash, section_title, page_no, created_at
       ) VALUES (?, ?, ?, ?, ?, NULL, ?)
-    `, [versionId, index, content, hash, sectionTitle, createdAt])
+    `, [versionId, index, content, hash, sectionTitle, toMysqlDate(createdAt)])
     ids.push(result.insertId)
   }
   return ids
@@ -172,7 +174,8 @@ async function replaceCurrentAssets(
           target_type, target_id, vector_kind, model_key, dimensions, content_hash,
           vector_json, created_at, updated_at
         ) VALUES ('chunk', ?, 'text', ?, ?, ?, ?, ?, ?)
-      `, [chunkId, embedding.model, vectorDimensions(embedding.vector), embedding.contentHash, JSON.stringify(embedding.vector), now, now])
+      `, [chunkId, embedding.model, vectorDimensions(embedding.vector), embedding.contentHash,
+        JSON.stringify(embedding.vector), toMysqlDate(now), toMysqlDate(now)])
     }
     if (chunk.asset === null) continue
     const [assetResult] = await connection.execute<ResultSetHeader>(`
@@ -188,7 +191,7 @@ async function replaceCurrentAssets(
       chunk.asset.contentHash,
       chunk.content,
       chunk.asset.image,
-      now,
+      toMysqlDate(now),
     ])
     for (const embedding of chunk.embeddings.filter(item => item.kind === 'vision')) {
       await connection.execute(`
@@ -196,7 +199,8 @@ async function replaceCurrentAssets(
           target_type, target_id, vector_kind, model_key, dimensions, content_hash,
           vector_json, created_at, updated_at
         ) VALUES ('asset', ?, 'vision', ?, ?, ?, ?, ?, ?)
-      `, [assetResult.insertId, embedding.model, vectorDimensions(embedding.vector), embedding.contentHash, JSON.stringify(embedding.vector), now, now])
+      `, [assetResult.insertId, embedding.model, vectorDimensions(embedding.vector), embedding.contentHash,
+        JSON.stringify(embedding.vector), toMysqlDate(now), toMysqlDate(now)])
     }
   }
 }
@@ -228,14 +232,15 @@ export class MysqlKnowledgeProjection {
     try {
       await connection.beginTransaction()
       if (documents.length === 0) {
-        await connection.execute("UPDATE knowledge_documents SET publication_status = 'offline', publication_updated_at = ?, updated_at = ?", [now, now])
+        await connection.execute("UPDATE knowledge_documents SET publication_status = 'offline', publication_updated_at = ?, updated_at = ?",
+          [toMysqlDate(now), toMysqlDate(now)])
       } else {
         await connection.query(`
           UPDATE knowledge_documents d
           JOIN knowledge_sources s ON s.id = d.source_id
           SET d.publication_status = 'offline', d.publication_updated_at = ?, d.updated_at = ?
           WHERE s.source_key NOT IN (?)
-        `, [now, now, documents.map(document => document.source)])
+        `, [toMysqlDate(now), toMysqlDate(now), documents.map(document => document.source)])
       }
       for (const document of documents) {
         const sourceIdValue = await sourceId(connection, document, now)

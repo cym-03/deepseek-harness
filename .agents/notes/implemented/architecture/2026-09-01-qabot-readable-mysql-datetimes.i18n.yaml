@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-09-01-qabot-readable-mysql-datetimes.md
+2026-09-01-qabot-readable-mysql-datetimes.md: 67a5c99baddedc603a32cf6e49712f8f53ccc049
+2026-09-01-qabot-readable-mysql-datetimes.zh.md: 528f111ff72fb90e8d0d68acb51ca61e03ab0a61

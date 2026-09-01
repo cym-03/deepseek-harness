@@ -15,6 +15,7 @@ describe('MySQL schema style', () => {
       '006_remove_ticket_priority.sql',
       '008_conversation_messages.sql',
       '009_conversation_message_reads.sql',
+      '010_readable_datetime.sql',
     ]) {
       const migration = await readFile(fileURLToPath(new URL(`../migrations/mysql/${name}`, import.meta.url)), 'utf8')
       expect(verifyMysqlSchemaStyle(migration)).toEqual([])
@@ -34,5 +35,12 @@ describe('MySQL schema style', () => {
       '第 3 行文本字段 name 未声明统一字符集和排序规则',
       '第 4 行数据表缺少中文 COMMENT',
     ])
+  })
+
+  it('does not treat UPDATE assignments as column declarations', () => {
+    expect(verifyMysqlSchemaStyle(`
+UPDATE conversations SET
+  created_at_readable = FROM_UNIXTIME(created_at / 1000.0);
+    `)).toEqual([])
   })
 })

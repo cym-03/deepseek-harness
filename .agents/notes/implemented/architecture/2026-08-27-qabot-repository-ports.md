@@ -18,6 +18,8 @@ The PostgreSQL driver and migration runner require `QABOT_DATABASE_URL`. Postgre
 
 The deployed company database is MySQL `hr_system`. A MySQL migration runner and initial schema exist separately from the PostgreSQL dialect. The runner serializes with `GET_LOCK` and records a dirty migration before executing DDL because MySQL DDL implicitly commits; startup refuses to continue past a dirty version. MySQL implements all four Repository providers, including transactional ticket replies, optimistic updates, leased Outbox claims, and abandoned-claim recovery. Runtime selection accepts `mysql`, requires `QABOT_MYSQL_URL`, and applies pending MySQL migrations before composing the service.
 
+MySQL business-date storage follows the [readable date decision](2026-09-01-qabot-readable-mysql-datetimes.md). Repository interfaces retain millisecond values while the MySQL adapter owns `DATETIME(3)` conversion.
+
 ## Alternatives considered
 
 - **Keep application services typed to SQLite classes:** rejected because database selection would leak connection and query behavior into every domain workflow.
@@ -29,4 +31,4 @@ The deployed company database is MySQL `hr_system`. A MySQL migration runner and
 
 Application workflows no longer require concrete SQLite classes and already accommodate network latency. SQLite remains the default and PostgreSQL fails startup without an explicit URL; no fallback can direct production writes into local files. Migration filenames must remain consecutive, failed files leave no recorded version, and concurrent migrators serialize on the advisory lock. PostgreSQL integration coverage exercises Ticket concurrency and rating together with the other repositories only with an explicit `QABOT_TEST_POSTGRES_URL`, and cleans its uniquely identified records. Deployment still requires a reachable database and verified connection credentials.
 
-MySQL cannot provide transactional rollback for schema DDL, so a failed migration may require manual repair before clearing its dirty record. MySQL integration coverage runs only with an explicit `QABOT_TEST_MYSQL_URL`; it never implicitly reuses the production URL. Migration 1 has been applied to `hr_system`, every table and column has a Chinese comment, the migration is clean, and a temporary-record smoke test passed before removing all business rows.
+MySQL cannot provide transactional rollback for schema DDL, so a failed migration may require manual repair before clearing its dirty record. MySQL integration coverage runs only with an explicit `QABOT_TEST_MYSQL_URL`; it never implicitly reuses the production URL. Applied migrations in `hr_system` remain clean, and every table and column has a Chinese comment.

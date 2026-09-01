@@ -40,7 +40,7 @@ describeMysql('MySQL Repository integration', () => {
       await messages.upsert([{ sessionId, sourceType: 'dsh_event', sourceId: '1', sourceOrder: 1,
         role: 'user', text: '测试消息已更新', createdAt: 100 }])
       expect(await messages.list(sessionId)).toEqual([
-        expect.objectContaining({ sessionId, role: 'user', text: '测试消息已更新' }),
+        expect.objectContaining({ sessionId, role: 'user', text: '测试消息已更新', createdAt: 100 }),
       ])
       expect(await messages.count(sessionId)).toBe(1)
       expect(await messages.unreadCounts([sessionId], 'agent:test', ['user'])).toEqual(new Map([[sessionId, 1]]))

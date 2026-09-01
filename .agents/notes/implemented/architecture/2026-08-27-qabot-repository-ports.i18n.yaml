@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-27-qabot-repository-ports.md
-2026-08-27-qabot-repository-ports.md: 5cff3af95b516c55922b3b595a5f1d693f2cd9d9
-2026-08-27-qabot-repository-ports.zh.md: 7b8d37452d9f2099af12668742ae52f0d6d08085
+2026-08-27-qabot-repository-ports.md: 39b19e5fe9702bb9d1bee385e6a6e11b1467d7c6
+2026-08-27-qabot-repository-ports.zh.md: bd7997691d16b5511162de8c1d74e93560624c0e

@@ -9,6 +9,7 @@ export function verifyMysqlSchemaStyle(sql: string): string[] {
   for (const [index, line] of sql.split(/\r?\n/).entries()) {
     const trimmed = line.trimStart()
     if (NON_COLUMN_PREFIXES.some(prefix => trimmed.startsWith(prefix))) continue
+    if (/^[a-z][a-z0-9_]*\s*=/.test(trimmed)) continue
     const column = COLUMN_LINE.exec(line)
     if (column !== null) {
       const definition = column[2] ?? ''

@@ -18,6 +18,8 @@ PostgreSQL 驱动和迁移执行器要求提供 `QABOT_DATABASE_URL`。PostgreSQ
 
 公司实际部署数据库为 MySQL `hr_system`。MySQL 迁移器和初始结构与 PostgreSQL 方言分开维护。迁移器使用 `GET_LOCK` 串行执行；由于 MySQL DDL 会隐式提交，执行前先记录 dirty 迁移，遇到 dirty 版本时拒绝继续。MySQL 已实现四类 Repository Provider，包括工单回复事务、乐观并发更新、Outbox 租约领取和遗留领取恢复。运行时选择接受 `mysql`，要求提供 `QABOT_MYSQL_URL`，并在组合服务前执行待处理 MySQL 迁移。
 
+MySQL 业务日期存储遵循[可读日期决策](2026-09-01-qabot-readable-mysql-datetimes.md)。Repository 接口保留毫秒值，由 MySQL 适配层负责 `DATETIME(3)` 转换。
+
 ## Alternatives considered
 
 - **应用服务继续使用 SQLite 类：** 拒绝，因为选择数据库会把连接与查询行为泄漏到每个领域流程。
@@ -29,4 +31,4 @@ PostgreSQL 驱动和迁移执行器要求提供 `QABOT_DATABASE_URL`。PostgreSQ
 
 应用流程不再要求具体 SQLite 类，并已适配网络延迟。SQLite 保持默认后端；PostgreSQL 缺少明确 URL 时启动失败，不会把生产写入回落到本地文件。迁移文件名必须连续，失败文件不会记录版本，并发迁移器会通过 advisory lock 串行执行。PostgreSQL 集成测试在明确设置 `QABOT_TEST_POSTGRES_URL` 时同时验证 Ticket 并发、评分和其他 Repository，并清理测试创建的唯一标识记录。部署仍然需要可达数据库和已验证的连接凭据。
 
-MySQL 数据结构 DDL 无法通过事务回滚，因此迁移失败后可能需要人工修复才能清除 dirty 记录。MySQL 集成测试只有在明确设置 `QABOT_TEST_MYSQL_URL` 时运行，不会隐式复用生产连接。迁移 1 已应用到 `hr_system`，所有表和字段均有中文备注，迁移状态干净；临时记录冒烟测试通过后已清空全部业务数据。
+MySQL 数据结构 DDL 无法通过事务回滚，因此迁移失败后可能需要人工修复才能清除 dirty 记录。MySQL 集成测试只有在明确设置 `QABOT_TEST_MYSQL_URL` 时运行，不会隐式复用生产连接。`hr_system` 中已执行的迁移保持干净，所有表和字段均有中文备注。

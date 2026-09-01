@@ -1,7 +1,8 @@
 /** Ordered MySQL migration discovery and execution. */
 import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import mysql, { type Pool, type RowDataPacket } from 'mysql2/promise'
+import mysql, { type Pool, type PoolConnection, type RowDataPacket } from 'mysql2/promise'
+import { toMysqlDate } from './mysql-time.ts'
 
 export interface MysqlMigration {
   version: number
@@ -14,7 +15,7 @@ export const MYSQL_MIGRATION_TABLE_SQL = `
     version INT NOT NULL PRIMARY KEY COMMENT '迁移版本号',
     name VARCHAR(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '迁移文件名',
     dirty TINYINT NOT NULL DEFAULT 1 COMMENT '迁移是否处于未完成状态',
-    applied_at BIGINT NULL COMMENT '迁移完成时间戳，Unix毫秒'
+    applied_at BIGINT NULL COMMENT '迁移完成时间戳，Unix毫秒；迁移10后改为可读日期'
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='Qabot数据库迁移记录'
 `
 
@@ -46,6 +47,18 @@ interface LockRow extends RowDataPacket {
   acquired: number | null
 }
 
+interface ColumnTypeRow extends RowDataPacket {
+  data_type: string
+}
+
+async function migrationAppliedAt(connection: PoolConnection, timestamp: number): Promise<number | Date> {
+  const [rows] = await connection.query<ColumnTypeRow[]>(`
+    SELECT DATA_TYPE AS data_type FROM information_schema.columns
+    WHERE table_schema = DATABASE() AND table_name = 'schema_migrations' AND column_name = 'applied_at'
+  `)
+  return rows[0]?.data_type === 'datetime' ? toMysqlDate(timestamp) : timestamp
+}
+
 export async function migrateMysql(pool: Pool, migrations: readonly MysqlMigration[]): Promise<number[]> {
   const connection = await pool.getConnection()
   try {
@@ -66,7 +79,7 @@ export async function migrateMysql(pool: Pool, migrations: readonly MysqlMigrati
       await connection.query(migration.sql)
       await connection.execute(
         'UPDATE schema_migrations SET dirty = 0, applied_at = ? WHERE version = ?',
-        [Date.now(), migration.version],
+        [await migrationAppliedAt(connection, Date.now()), migration.version],
       )
       completed.push(migration.version)
     }
@@ -81,7 +94,13 @@ export async function migrateMysql(pool: Pool, migrations: readonly MysqlMigrati
 }
 
 export function createMysqlPool(url: string, connectionLimit = 10): Pool {
-  return mysql.createPool({ uri: url, connectionLimit, multipleStatements: true, enableKeepAlive: true })
+  return mysql.createPool({
+    uri: url,
+    connectionLimit,
+    multipleStatements: true,
+    enableKeepAlive: true,
+    timezone: '+08:00',
+  })
 }
 
 export async function migrateMysqlUrl(url: string, migrations: readonly MysqlMigration[]): Promise<number[]> {

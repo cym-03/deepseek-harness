@@ -153,7 +153,7 @@ QABOT_DATABASE_URL=postgres://user:password@host:5432/qabot pnpm --filter @deeps
 pnpm --filter @deepseek-ai/dsh-qabot run db:migrate:mysql
 ```
 
-MySQL 后端提供完整的 Conversation、Ticket、Audit 和 Outbox Repository。服务启动以及知识同步、审核、发布、上下架或删除后，会把知识来源、文档、版本、分块、资产和向量快照投影到 `hr_system`。投影只复制已有向量，不会请求 embedding；Repository 切换期间 `kb.db` 仍是可重建的 FTS 与相似度检索缓存。部署配置为 `QABOT_DATABASE_BACKEND=mysql` 与 `QABOT_MYSQL_URL`；启动会自动执行待处理迁移。真实集成测试只读取 `QABOT_TEST_MYSQL_URL`，不得将其长期指向生产数据库。
+MySQL 后端提供完整的 Conversation、Ticket、Audit 和 Outbox Repository。服务启动以及知识同步、审核、发布、上下架或删除后，会把知识来源、文档、版本、分块、资产和向量快照投影到 `hr_system`。投影只复制已有向量，不会请求 embedding；Repository 切换期间 `kb.db` 仍是可重建的 FTS 与相似度检索缓存。业务日期使用 Asia/Shanghai 时区的 `DATETIME(3)` 字段，运维人员可以直接看到 `年-月-日 时:分:秒.毫秒`；Repository 在应用边界把日期转换为 Unix 毫秒。部署配置为 `QABOT_DATABASE_BACKEND=mysql` 与 `QABOT_MYSQL_URL`；启动会自动执行待处理迁移。真实集成测试只读取 `QABOT_TEST_MYSQL_URL`，不得将其长期指向生产数据库。
 
 员工、智能助手与人工客服公开消息使用稳定来源标识投影到 MySQL `conversation_messages`。DSH 会话事件继续保存模型可见历史，门户时间线则读取持久业务投影，并且不会因某次会话文件读取为空而删除已存消息。已有会话可执行一次 `pnpm --filter @deepseek-ai/dsh-qabot run db:project-messages` 完成回填；该命令具备幂等性，不会调用语言模型或向量模型。
 
