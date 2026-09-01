@@ -7,6 +7,7 @@ import {
   MysqlConversationMessageRepository,
   MysqlConversationRepository,
   MysqlOutboxRepository,
+  MysqlStaffRepository,
   MysqlTicketRepository,
 } from '../src/database/mysql-repositories.ts'
 
@@ -55,6 +56,12 @@ describeMysql('MySQL Repository integration', () => {
       expect(await audit.append({ actorId: userKey, action: 'test.action', resourceType: 'test', resourceId: suffix, detail: null }))
         .toMatchObject({ actorId: userKey, resourceId: suffix })
 
+      const staff = new MysqlStaffRepository(pool)
+      await staff.upsert({ openId: userKey, group: 'IT', name: '测试服务人员' })
+      expect(await staff.notifyTargets('IT')).toContain(userKey)
+      expect(await staff.list()).toContainEqual({ openId: userKey, group: 'IT', name: '测试服务人员', active: true })
+      expect(await staff.remove(userKey, 'IT')).toBe(true)
+
       const tickets = new MysqlTicketRepository(pool)
       const ticket = await tickets.ensureOpen({ sessionId, userKey, question: '需要人工帮助' })
       await tickets.markHandoff(sessionId, '需要人工', 'IT')
@@ -79,6 +86,7 @@ describeMysql('MySQL Repository integration', () => {
       await pool.execute('DELETE FROM conversation_messages WHERE session_id = ?', [sessionId])
       await pool.execute('DELETE FROM outbox_messages WHERE idempotency_key = ?', [outboxKey])
       await pool.execute('DELETE FROM audit_records WHERE actor_id = ?', [userKey])
+      await pool.execute('DELETE FROM service_staff_members WHERE employee_open_id = ?', [userKey])
       await pool.execute('DELETE FROM ticket_replies WHERE ticket_id IN (SELECT id FROM tickets WHERE user_key = ?)', [userKey])
       await pool.execute('DELETE FROM tickets WHERE user_key = ?', [userKey])
       await pool.execute('DELETE FROM conversations WHERE user_key = ?', [userKey])

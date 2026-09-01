@@ -127,6 +127,7 @@ export class Qabot {
     private readonly conversations: ConversationRepository,
     private readonly repositoryRoot: string,
     private readonly onEvent?: SessionEventListener,
+    private readonly persistedSessionIds?: Set<string>,
   ) {
     // 火线订阅所有会话事件，按 sessionId 路由（Phase 1b 飞书流式用）。
     this.ctx.on('session/event', (session: Session, event: SessionEvent) => {
@@ -197,6 +198,7 @@ export class Qabot {
     this.allSessions.set(userKey, list)
     this.current.set(userKey, handle)
     await this.conversations.create(userKey, sessionId)
+    this.persistedSessionIds?.add(sessionId)
     return handle
   }
 
@@ -206,7 +208,8 @@ export class Qabot {
   }
 
   private hasPersistedSession(sessionId: string): boolean {
-    return hasPersistedQabotSession(this.repositoryRoot, sessionId)
+    return this.persistedSessionIds?.has(sessionId)
+      ?? hasPersistedQabotSession(this.repositoryRoot, sessionId)
   }
 
   /** 取（或建）该用户当前会话。 */

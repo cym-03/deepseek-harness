@@ -15,7 +15,7 @@ Portal App.vue (smart-qa/qa-admin) ──HTTP──→ Qabot service (node:http,
                           │ In-process dsh Qabot engine        │
                           │  agent-spine + llm-deepseek        │
                           │  kb_search + request_human_handoff │
-                          │  ticket (SQLite) + session         │
+                          │  MySQL repositories + session log  │
                           └───────────────────┬───────────────┘
                                               └─→ Feishu notification adapter
 ```
@@ -153,9 +153,9 @@ QABOT_DATABASE_URL=postgres://user:password@host:5432/qabot pnpm --filter @deeps
 pnpm --filter @deepseek-ai/dsh-qabot run db:migrate:mysql
 ```
 
-MySQL 后端提供完整的 Conversation、Ticket、Audit 和 Outbox Repository。服务启动以及知识同步、审核、发布、上下架或删除后，会把知识来源、文档、版本、分块、资产和向量快照投影到 `hr_system`。投影只复制已有向量，不会请求 embedding；Repository 切换期间 `kb.db` 仍是可重建的 FTS 与相似度检索缓存。业务日期使用 Asia/Shanghai 时区的 `DATETIME(3)` 字段，运维人员可以直接看到 `年-月-日 时:分:秒.毫秒`；Repository 在应用边界把日期转换为 Unix 毫秒。部署配置为 `QABOT_DATABASE_BACKEND=mysql` 与 `QABOT_MYSQL_URL`；启动会自动执行待处理迁移。真实集成测试只读取 `QABOT_TEST_MYSQL_URL`，不得将其长期指向生产数据库。
+MySQL 后端把会话、消息、工单、审计记录、Outbox、服务人员配置、知识提交记录、知识版本与向量、查询向量缓存和 DSH 模型原始事件统一保存到 `hr_system`。模型检索直接读取 MySQL 中已发布且处于生效期内的版本；`kb.db` 是用于同步、审核和向量计算的可重建录入索引。投影只复制已有向量，不会再次请求 embedding；重复语义问题按问题哈希和模型标识复用 MySQL 查询向量。业务日期使用 Asia/Shanghai 时区的 `DATETIME(3)` 字段，运维人员可以直接看到 `年-月-日 时:分:秒.毫秒`；Repository 在应用边界把日期转换为 Unix 毫秒。部署配置为 `QABOT_DATABASE_BACKEND=mysql` 与 `QABOT_MYSQL_URL`；启动会自动执行待处理迁移。真实集成测试只读取 `QABOT_TEST_MYSQL_URL`，不得将其长期指向生产数据库。
 
-员工、智能助手与人工客服公开消息使用稳定来源标识投影到 MySQL `conversation_messages`。DSH 会话事件继续保存模型可见历史，门户时间线则读取持久业务投影，并且不会因某次会话文件读取为空而删除已存消息。已有会话可执行一次 `pnpm --filter @deepseek-ai/dsh-qabot run db:project-messages` 完成回填；该命令具备幂等性，不会调用语言模型或向量模型。
+员工、智能助手与人工客服公开消息使用稳定来源标识投影到 MySQL `conversation_messages`。`dsh_model_sessions` 与 `dsh_model_session_events` 保存恢复会话所需的完整模型历史，门户时间线读取持久业务投影。迁移 11 一次性导入旧 JSONL 会话和服务人员记录，在 `qabot_data_imports` 记录完成状态，并保留源文件作为回退证据。只有旧部署仍缺少消息投影时才需执行 `pnpm --filter @deepseek-ai/dsh-qabot run db:project-messages`；该命令具备幂等性，不会调用语言模型或向量模型。
 
 MySQL `conversation_message_reads` 分别保存员工端和客服端的已读位置。会话列表返回按角色过滤的 `unreadCount`，读取有权访问的会话详情只推进当前查看者的已读位置。迁移 `009_conversation_message_reads.sql` 将已有消息记录为功能启用基线，因此只有后续回复开始参与未读计数。
 
@@ -171,7 +171,7 @@ MySQL `conversation_message_reads` 分别保存员工端和客服端的已读位
 
 ### 日志
 - 控制台 + `apps/qabot/data/qabot.log`（带时间戳/级别）
-- 运行数据都在 `apps/qabot/data/`：`kb.db`/`tickets.db`/`conversations.db`/`kb-sources.json`/`staff.json`
+- `apps/qabot/data/` 保存可重建录入索引、本地开发数据库、飞书来源配置、日志和切换 MySQL 前的迁移证据；生产业务状态统一保存在 `hr_system`。
 
 ### 开机自启（Windows 任务计划程序）
 ```powershell
@@ -191,7 +191,7 @@ schtasks /Delete /TN "qabot-service" /F
 
 - **中转余额**：`192.168.10.61:3000` 间歇 `Insufficient Balance` → 偶发 STREAM_CLOSED，需充值。
 - **空回复自动重试**：中继异常导致回合空回复时自动重试一次，仍空则返回「模型服务暂时异常，请稍后重试」，不再让用户看到空白（重试的系统提示在会话转录中隐藏）。
-- **向量索引增量持久化**：向量表随 `kb.db` 持久保留，不会每次启动重建。文本和视觉向量分别使用 `text`/`vision` 类型；内容、模型或维度变化时只更新失效记录。飞书图片原始数据保存在 `vision_assets`，因此视觉模型切换后不需要依赖旧下载链接。启用 MySQL 时，同一批向量和图片二进制会直接投影到 `hr_system`，不会重新计算。
+- **向量索引增量持久化**：MySQL 保存生产文本与视觉向量；录入索引仅在内容哈希、模型或维度变化时重新计算，再把结果投影到 `hr_system`，不会二次调用模型。查询向量缓存避免同一规范化问题和模型重复请求 embedding。
 - **知识上下架**：已下架、未到生效时间和已过失效时间的文档不会进入关键词、文本向量、视觉向量或图片返回。重新上线会复用未变化的向量。
 - **视觉检索**：设置 `VISION_EMBED_MODEL=qwen3-vl-embedding` 后，飞书文档图片会下载并生成独立视觉向量。员工文本查询使用同一模型生成查询向量，与文本检索结果合并。需要飞书 `drive:drive:readonly` 下载权限。
 - **飞书权限**：应用需开通 `im:message:send_as_bot`（发消息）等权限，否则发送会降级为仅记日志。

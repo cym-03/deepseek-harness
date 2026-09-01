@@ -24,8 +24,8 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { KbStore, type KbMediaRef } from '../kb/store.ts'
+import type { KnowledgeSearch } from '../kb/search.ts'
 import { KbSourcesStore } from '../kb/sources.ts'
-import { StaffStore } from '../staff/store.ts'
 import type { Ticket } from '../ticket/store.ts'
 import { EMPLOYEE_TICKET_MESSAGE_PREFIX, loadConversationTimeline } from '../conversation/timeline.ts'
 import { Qabot } from '../runner.ts'
@@ -36,6 +36,7 @@ import type {
   AuditRepository,
   ConversationMessageRepository,
   OutboxRepository,
+  StaffRepository,
   TicketRepository,
 } from '../domain/repositories.ts'
 
@@ -83,7 +84,8 @@ export interface QabotHttpOptions {
   qabot: Qabot
   tickets: TicketRepository
   kb: KbStore
-  staff: StaffStore
+  knowledgeSearch?: KnowledgeSearch
+  staff: StaffRepository
   /** 飞书知识源配置 + 同步入口（未提供则知识源接口不可用）。 */
   sources?: KbSourcesStore
   syncFeishu?: () => Promise<{ synced: number; failed: number; errors: string[] }>
@@ -96,6 +98,7 @@ export interface QabotHttpOptions {
 
 export async function startHttpServer(options: QabotHttpOptions): Promise<ReturnType<typeof createServer>> {
   const { qabot, tickets, kb, staff, audit, outbox, messages, sources, syncFeishu, projectKnowledge } = options
+  const knowledgeSearch = options.knowledgeSearch ?? kb
   const token = process.env.QABOT_API_TOKEN
   if (token === undefined || token.trim() === '') {
     throw new Error('必须配置 QABOT_API_TOKEN（所有环境强制）。未配置时拒绝启动，防止内网机器绕过门户直接调用本服务；apps/qabot/start-qabot.bat 已内置默认令牌。')
@@ -239,7 +242,7 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     const currentTicket = sessionId === undefined ? undefined : await tickets.forSession(sessionId)
     if (sessionId !== undefined && currentTicket !== undefined
       && ['waiting_agent', 'in_service', 'waiting_employee', 'reopened'].includes(currentTicket.status)) {
-      if (!await kb.hasRelevantContent(message)) {
+      if (!await knowledgeSearch.hasRelevantContent(message)) {
         await tickets.addReply(currentTicket.id, `${EMPLOYEE_TICKET_MESSAGE_PREFIX}${message}`)
         await qabot.employeeMessage(sessionId, message)
         return {
@@ -560,7 +563,7 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     const toGroup = typeof body.toGroup === 'string' ? body.toGroup.trim() : ''
     const assignee = typeof body.assignee === 'string' ? body.assignee.trim() : ''
     const version = typeof body.version === 'number' && Number.isInteger(body.version) ? body.version : null
-    const target = staff.list().find(member => member.active && member.group === toGroup
+    const target = (await staff.list()).find(member => member.active && member.group === toGroup
       && (member.name === assignee || member.openId === assignee))
     if (toGroup === '' || target === undefined) throw new Error('TRANSFER_TARGET_INVALID')
     if (version === null) throw new Error('VERSION_REQUIRED')
@@ -593,7 +596,7 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
   route('GET', '/v1/agent/staff', async (ctx) => {
     requireServiceDesk(ctx)
     const group = ctx.url.searchParams.get('group')
-    const members = staff.list()
+    const members = await staff.list()
     return { staff: group === null ? members : members.filter(member => member.group === group) }
   })
 
@@ -602,17 +605,17 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     const body = ctx.json as { openId?: unknown; group?: unknown; name?: unknown; active?: unknown }
     const openId = typeof body.openId === 'string' ? body.openId.trim() : ''
     if (openId === '') throw new Error('STAFF_INVALID')
-    staff.upsert({ openId, ...(typeof body.group === 'string' ? { group: body.group } : {}), ...(typeof body.name === 'string' ? { name: body.name } : {}), ...(typeof body.active === 'boolean' ? { active: body.active } : {}) })
+    await staff.upsert({ openId, ...(typeof body.group === 'string' ? { group: body.group } : {}), ...(typeof body.name === 'string' ? { name: body.name } : {}), ...(typeof body.active === 'boolean' ? { active: body.active } : {}) })
     await audit.append({ actorId: identity.employeeId, action: 'staff.upsert', resourceType: 'staff', resourceId: openId, detail: typeof body.group === 'string' ? JSON.stringify({ group: body.group }) : null })
-    return { ok: true, staff: staff.list() }
+    return { ok: true, staff: await staff.list() }
   })
 
   route('DELETE', '/v1/system/staff/<openId>', async (ctx) => {
     const identity = requireSystemAdmin(ctx)
     const group = ctx.url.searchParams.get('group')
-    if (!staff.remove(ctx.params.openId ?? '', group ?? undefined)) throw new Error('STAFF_NOT_FOUND')
+    if (!await staff.remove(ctx.params.openId ?? '', group ?? undefined)) throw new Error('STAFF_NOT_FOUND')
     await audit.append({ actorId: identity.employeeId, action: 'staff.remove', resourceType: 'staff', resourceId: ctx.params.openId ?? '', detail: group === null ? null : JSON.stringify({ group }) })
-    return { ok: true, staff: staff.list() }
+    return { ok: true, staff: await staff.list() }
   })
 
   route('GET', '/v1/knowledge', async (ctx) => {
@@ -685,6 +688,7 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     const title = typeof body.title === 'string' ? body.title.trim() : ''
     if (url === '' || !/^https?:\/\/.+\.feishu\.cn\//.test(url)) throw new Error('KNOWLEDGE_URL_INVALID')
     const created = kb.addPending(url, title || '未命名')
+    await projectKnowledge?.()
     await audit.append({ actorId: identity.employeeId, action: 'knowledge.review.submit', resourceType: 'knowledge-review', resourceId: String(created.id), detail: null })
     return { ok: true, id: created.id }
   })
@@ -697,6 +701,7 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     const title = typeof body.title === 'string' ? body.title.trim() : ''
     if (url === '' || !/^https?:\/\/.+\.feishu\.cn\//.test(url)) throw new Error('KNOWLEDGE_URL_INVALID')
     if (!kb.updatePending(id, url, title)) throw new Error('KNOWLEDGE_REVIEW_CONFLICT')
+    await projectKnowledge?.()
     await audit.append({ actorId: identity.employeeId, action: 'knowledge.review.update', resourceType: 'knowledge-review', resourceId: String(id), detail: null })
     return { ok: true }
   })
@@ -705,6 +710,7 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     const identity = requireKnowledgeReviewer(ctx)
     const id = Number(ctx.params.id)
     if (!kb.setPendingStatus(id, 'rejected')) throw new Error('KNOWLEDGE_REVIEW_CONFLICT')
+    await projectKnowledge?.()
     await audit.append({ actorId: identity.employeeId, action: 'knowledge.review.reject', resourceType: 'knowledge-review', resourceId: String(id), detail: null })
     return { ok: true }
   })
@@ -1015,7 +1021,7 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
       send(ctx.res, 400, { error: 'toGroup 必填（IT/人事/行政/财务/default）' })
       return undefined
     }
-    const target = staff.list().find(member => member.active && member.group === toGroup
+    const target = (await staff.list()).find(member => member.active && member.group === toGroup
       && (member.name === assignee || member.openId === assignee))
     if (target === undefined) {
       send(ctx.res, 400, { error: '请选择目标服务组中已启用的服务人员' })
@@ -1203,6 +1209,7 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
       return undefined
     }
     const { id } = kb.addPending(url, title || '未命名')
+    await projectKnowledge?.()
     return { ok: true, id }
   })
 
@@ -1243,6 +1250,7 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
       return undefined
     }
     const result = await syncFeishu()
+    await projectKnowledge?.()
     return { ok: true, synced: result.synced, errors: result.errors }
   })
 
@@ -1252,6 +1260,7 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
       send(ctx.res, 400, { error: '该条目已处理' })
       return undefined
     }
+    await projectKnowledge?.()
     return { ok: true }
   })
 
@@ -1268,13 +1277,15 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
       send(ctx.res, 400, { error: '该条目已处理或不存在' })
       return undefined
     }
+    await projectKnowledge?.()
     return { ok: true }
   })
 
   // 服务人员名单（qa-admin 后台配置用，按身份组）
   route('GET', '/api/staff', async (ctx) => {
     const group = ctx.url.searchParams.get('group')
-    return group === null ? staff.list() : staff.list().filter(m => m.group === group)
+    const members = await staff.list()
+    return group === null ? members : members.filter(m => m.group === group)
   })
 
   route('POST', '/api/staff', async (ctx) => {
@@ -1284,25 +1295,25 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
       send(ctx.res, 400, { error: 'openId 必填' })
       return undefined
     }
-    staff.upsert({
+    await staff.upsert({
       openId,
       ...typeof body.group === 'string' ? { group: body.group } : {},
       ...typeof body.name === 'string' ? { name: body.name } : {},
       ...typeof body.active === 'boolean' ? { active: body.active } : {},
     })
-    return { ok: true, staff: staff.list() }
+    return { ok: true, staff: await staff.list() }
   })
 
   route('DELETE', '/api/staff/<openId>', async (ctx) => {
     const group = ctx.url.searchParams.get('group')
     const removed = group === null
-      ? staff.remove(ctx.params.openId ?? '')
-      : staff.remove(ctx.params.openId ?? '', group)
+      ? await staff.remove(ctx.params.openId ?? '')
+      : await staff.remove(ctx.params.openId ?? '', group)
     if (!removed) {
       send(ctx.res, 404, { error: '服务人员不存在' })
       return undefined
     }
-    return { ok: true, staff: staff.list() }
+    return { ok: true, staff: await staff.list() }
   })
 
   const server = createServer(async (req, res) => {

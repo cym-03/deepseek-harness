@@ -10,11 +10,13 @@ import type {
   ConversationMessageRepository,
   ConversationRepository,
   OutboxRepository,
+  StaffRepository,
   TicketRepository,
 } from '../domain/repositories.ts'
 import type { OutboxEventType, OutboxMessage } from '../integration/outbox.ts'
 import type { Ticket, TicketKind, TicketStatus } from '../ticket/store.ts'
 import { fromMysqlDate, type MysqlDateValue, toMysqlDate } from './mysql-time.ts'
+import type { StaffMember } from '../staff/store.ts'
 
 interface ConversationRow extends RowDataPacket {
   user_key: string
@@ -260,6 +262,104 @@ export class MysqlAuditRepository implements AuditRepository {
       FROM audit_records ORDER BY id DESC LIMIT ${safeLimit}
     `)
     return rows.map(toAudit)
+  }
+}
+
+interface StaffMemberRow extends RowDataPacket {
+  employee_open_id: string
+  group_name: string
+  employee_name: string | null
+  active: number
+}
+
+/** MySQL-backed service-team configuration. */
+export class MysqlStaffRepository implements StaffRepository {
+  constructor(private readonly pool: Pool) {}
+
+  async list(): Promise<StaffMember[]> {
+    const [rows] = await this.pool.query<StaffMemberRow[]>(`
+      SELECT employee_open_id, group_name, employee_name, active
+      FROM service_staff_members ORDER BY created_at, employee_open_id, group_name
+    `)
+    return rows.map(row => ({
+      openId: row.employee_open_id,
+      group: row.group_name,
+      name: row.employee_name,
+      active: row.active === 1,
+    }))
+  }
+
+  async notifyTargets(group?: string): Promise<string[]> {
+    const values: Array<string> = []
+    let sql = 'SELECT DISTINCT employee_open_id FROM service_staff_members WHERE active = 1'
+    if (group !== undefined) {
+      sql += ' AND group_name = ?'
+      values.push(group)
+    }
+    const [rows] = await this.pool.execute<Array<RowDataPacket & { employee_open_id: string }>>(sql, values)
+    return rows.map(row => row.employee_open_id)
+  }
+
+  async groups(): Promise<string[]> {
+    const [rows] = await this.pool.query<Array<RowDataPacket & { group_name: string }>>(
+      'SELECT DISTINCT group_name FROM service_staff_members ORDER BY group_name',
+    )
+    return [...new Set(['default', ...rows.map(row => row.group_name)])]
+  }
+
+  async upsert(member: { openId: string; group?: string; name?: string; active?: boolean }): Promise<void> {
+    const now = Date.now()
+    await this.pool.execute(`
+      INSERT INTO service_staff_members (
+        employee_open_id, group_name, employee_name, active, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE employee_name = VALUES(employee_name), active = VALUES(active), updated_at = VALUES(updated_at)
+    `, [member.openId, member.group ?? 'default', member.name ?? null, member.active === false ? 0 : 1,
+      toMysqlDate(now), toMysqlDate(now)])
+  }
+
+  async remove(openId: string, group?: string): Promise<boolean> {
+    const [result] = group === undefined
+      ? await this.pool.execute<ResultSetHeader>('DELETE FROM service_staff_members WHERE employee_open_id = ?', [openId])
+      : await this.pool.execute<ResultSetHeader>(
+        'DELETE FROM service_staff_members WHERE employee_open_id = ? AND group_name = ?', [openId, group],
+      )
+    return result.affectedRows > 0
+  }
+
+  /** Imports legacy SQLite/JSON members exactly once without recreating later deletions. */
+  async importLegacyOnce(members: readonly StaffMember[]): Promise<number> {
+    const connection = await this.pool.getConnection()
+    try {
+      await connection.beginTransaction()
+      const [existing] = await connection.execute<RowDataPacket[]>(
+        'SELECT import_key FROM qabot_data_imports WHERE import_key = ? FOR UPDATE', ['legacy-staff-v1'],
+      )
+      if (existing.length > 0) {
+        await connection.rollback()
+        return 0
+      }
+      const now = Date.now()
+      for (const member of members) {
+        await connection.execute(`
+          INSERT INTO service_staff_members (
+            employee_open_id, group_name, employee_name, active, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE employee_name = COALESCE(employee_name, VALUES(employee_name))
+        `, [member.openId, member.group, member.name, member.active ? 1 : 0, toMysqlDate(now), toMysqlDate(now)])
+      }
+      await connection.execute(
+        'INSERT INTO qabot_data_imports (import_key, imported_at, detail_json) VALUES (?, ?, ?)',
+        ['legacy-staff-v1', toMysqlDate(now), JSON.stringify({ members: members.length })],
+      )
+      await connection.commit()
+      return members.length
+    } catch (error) {
+      await connection.rollback()
+      throw error
+    } finally {
+      connection.release()
+    }
   }
 }
 

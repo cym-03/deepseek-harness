@@ -17,7 +17,7 @@ export interface FeishuNotifyOptions {
   /** 门户地址（卡片「进入后台」跳转用）。默认 http://localhost:5173 */
   portalUrl?: string
   /** 动态获取服务人员 open_id（按身份组）。缺省读 staff.json/env。 */
-  getStaff?: (group?: string) => string[]
+  getStaff?: (group?: string) => string[] | Promise<string[]>
 }
 
 export class FeishuNotificationAdapter implements QabotNotificationAdapter {
@@ -30,7 +30,7 @@ export class FeishuNotificationAdapter implements QabotNotificationAdapter {
   }
 
   /** 当前服务人员 open_id 列表（按身份组，组空回退 default）。 */
-  private staffOpenIds(group?: string): string[] {
+  private async staffOpenIds(group?: string): Promise<string[]> {
     if (this.options.getStaff !== undefined) return this.options.getStaff(group)
     return loadStaffOpenIds(group)
   }
@@ -57,7 +57,7 @@ export class FeishuNotificationAdapter implements QabotNotificationAdapter {
   /** 转人工：给对应身份组的服务人员发交互卡片（进入后台按钮）。飞书失败只记日志。 */
   async notifyHandoff(ticket: Ticket): Promise<void> {
     const group = ticket.department ?? 'default'
-    const staff = this.staffOpenIds(group)
+    const staff = await this.staffOpenIds(group)
     if (staff.length === 0) {
       console.warn(`[feishu] 身份组「${group}」无服务人员，且无 default 兜底，跳过通知`)
       return

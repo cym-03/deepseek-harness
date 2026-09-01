@@ -1,6 +1,7 @@
 /** Selects and owns Qabot business-data Repository providers. */
 import { join } from 'node:path'
 import postgres from 'postgres'
+import type { Pool } from 'mysql2/promise'
 import { AuditStore } from '../audit/store.ts'
 import { ConversationStore } from '../conversation/store.ts'
 import type {
@@ -8,17 +9,20 @@ import type {
   ConversationMessageRepository,
   ConversationRepository,
   OutboxRepository,
+  StaffRepository,
   TicketRepository,
 } from '../domain/repositories.ts'
 import { OutboxStore } from '../integration/outbox.ts'
 import { TicketStore } from '../ticket/store.ts'
 import { createMysqlPool, loadMysqlMigrations, migrateMysql } from './mysql-migrator.ts'
 import { MysqlKnowledgeProjection } from './mysql-knowledge-projection.ts'
+import { MysqlKnowledgeSearch } from './mysql-knowledge-search.ts'
 import {
   MysqlAuditRepository,
   MysqlConversationMessageRepository,
   MysqlConversationRepository,
   MysqlOutboxRepository,
+  MysqlStaffRepository,
   MysqlTicketRepository,
 } from './mysql-repositories.ts'
 import { loadPostgresMigrations, migratePostgres } from './postgres-migrator.ts'
@@ -36,6 +40,9 @@ export interface QabotRepositories {
   outbox: OutboxRepository
   messages?: ConversationMessageRepository
   knowledge?: MysqlKnowledgeProjection
+  knowledgeSearch?: MysqlKnowledgeSearch
+  staff?: StaffRepository
+  mysqlPool?: Pool
   dispose(): Promise<void>
 }
 
@@ -75,6 +82,7 @@ export async function createQabotRepositories(
       await pool.end()
       throw error
     }
+    const staff = new MysqlStaffRepository(pool)
     return {
       conversations: new MysqlConversationRepository(pool),
       messages: new MysqlConversationMessageRepository(pool),
@@ -82,6 +90,9 @@ export async function createQabotRepositories(
       audit: new MysqlAuditRepository(pool),
       outbox: new MysqlOutboxRepository(pool),
       knowledge: new MysqlKnowledgeProjection(pool),
+      knowledgeSearch: new MysqlKnowledgeSearch(pool),
+      staff,
+      mysqlPool: pool,
       dispose: async () => { await pool.end() },
     }
   }

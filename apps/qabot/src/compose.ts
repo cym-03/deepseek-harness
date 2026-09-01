@@ -13,6 +13,8 @@ import * as AgentSpine from '@deepseek-ai/dsh-agent-spine-demo'
 import * as LlmDeepseek from '@deepseek-ai/dsh-llm-deepseek'
 import AgentDefaultModelConfig from '@deepseek-ai/dsh-agent-default-model'
 import SessionPersistenceJsonl from '@deepseek-ai/dsh-session-persistence-jsonl'
+import type { Pool } from 'mysql2/promise'
+import MysqlSessionPersistence from './database/mysql-session-persistence.ts'
 import * as KbTool from './plugins/kb-tool.ts'
 import * as TicketTool from './plugins/ticket-tool.ts'
 import type { TicketRepository } from './domain/repositories.ts'
@@ -26,8 +28,12 @@ export interface QabotComposeOptions {
   dataDir: string
   /** 知识库 SQLite 文件路径。 */
   kbDbPath: string
+  /** Knowledge retrieval provider; defaults to the local SQLite store outside MySQL mode. */
+  knowledgeSearch?: import('./kb/search.ts').KnowledgeSearch
   /** 与应用服务共享的工单 Repository。 */
   tickets: TicketRepository
+  /** Shared MySQL pool; when present, model session logs use MySQL instead of JSONL. */
+  mysqlPool?: Pool
 }
 
 export const DEFAULT_PERSONA = `你是公司的智能问答助手，服务对象是公司员工。
@@ -77,13 +83,16 @@ export async function composeDsh(options: QabotComposeOptions): Promise<Context>
     model: options.model,
   })
 
-  // 会话持久化（JSONL，按 session 分目录）。
-  ctx.plugin(SessionPersistenceJsonl, {
-    root: join(options.dataDir, 'sessions'),
-  })
+  if (options.mysqlPool === undefined) {
+    ctx.plugin(SessionPersistenceJsonl, { root: join(options.dataDir, 'sessions') })
+  } else {
+    ctx.plugin(MysqlSessionPersistence, { pool: options.mysqlPool })
+  }
 
   // 自研工具。
-  ctx.plugin(KbTool, { dbPath: options.kbDbPath })
+  ctx.plugin(KbTool, options.knowledgeSearch === undefined
+    ? { dbPath: options.kbDbPath }
+    : { search: options.knowledgeSearch })
   ctx.plugin(TicketTool, { tickets: options.tickets })
 
   // 让所有插件 fiber 结算，服务就绪后再返回。

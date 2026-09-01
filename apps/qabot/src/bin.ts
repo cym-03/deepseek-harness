@@ -30,6 +30,8 @@ import { loadPostgresMigrations, migratePostgresUrl } from './database/postgres-
 import { createQabotRepositories, type QabotRepositories } from './database/runtime.ts'
 import { loadMysqlMigrations, migrateMysqlUrl } from './database/mysql-migrator.ts'
 import { loadConversationTimeline } from './conversation/timeline.ts'
+import { MysqlStaffRepository } from './database/mysql-repositories.ts'
+import { importLegacyJsonlSessions } from './database/mysql-session-import.ts'
 
 const root = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..')
 const appDir = join(root, 'apps', 'qabot')
@@ -42,6 +44,10 @@ const mysqlMigrationsDir = join(appDir, 'migrations', 'mysql')
 /** 组合 dsh 上下文并构建引擎（console / feishu 共用）。调用方负责 dispose。 */
 async function buildQabot(): Promise<{ qabot: Qabot; repositories: QabotRepositories; dispose(): Promise<void> }> {
   const repositories = await createQabotRepositories(dataDir, postgresMigrationsDir, mysqlMigrationsDir)
+  if (repositories.mysqlPool !== undefined) {
+    const imported = await importLegacyJsonlSessions(repositories.mysqlPool, dataDir)
+    if (imported > 0) console.log(`[session-storage] 已迁移 ${imported} 个模型原始会话到 MySQL`)
+  }
   let ctx
   try {
     ctx = await composeDsh({
@@ -50,12 +56,17 @@ async function buildQabot(): Promise<{ qabot: Qabot; repositories: QabotReposito
       dataDir,
       kbDbPath,
       tickets: repositories.tickets,
+      ...repositories.knowledgeSearch === undefined ? {} : { knowledgeSearch: repositories.knowledgeSearch },
+      ...repositories.mysqlPool === undefined ? {} : { mysqlPool: repositories.mysqlPool },
     })
   } catch (error) {
     await repositories.dispose()
     throw error
   }
-  const qabot = new Qabot(ctx, repositories.tickets, repositories.conversations, root)
+  const persistedSessionIds = repositories.mysqlPool === undefined
+    ? undefined
+    : new Set((await ctx.sessionPersistence.list()).map(header => String(header.id)))
+  const qabot = new Qabot(ctx, repositories.tickets, repositories.conversations, root, undefined, persistedSessionIds)
   return {
     qabot,
     repositories,
@@ -182,7 +193,13 @@ async function cmdServe(): Promise<void> {
   } catch (error) {
     console.error('[kb] 向量索引失败:', error instanceof Error ? error.message : error)
   }
-  const staff = new StaffStore(join(dataDir, 'staff.db'), join(appDir, 'data', 'staff.json'))
+  const legacyStaff = new StaffStore(join(dataDir, 'staff.db'), join(appDir, 'data', 'staff.json'))
+  const staff = repositories.staff ?? legacyStaff
+  if (staff instanceof MysqlStaffRepository) {
+    const imported = await staff.importLegacyOnce(legacyStaff.list())
+    if (imported > 0) console.log(`[staff-storage] 已迁移 ${imported} 条服务人员配置到 MySQL`)
+    legacyStaff.dispose()
+  }
   const appId = process.env.FEISHU_APP_ID
   const appSecret = process.env.FEISHU_APP_SECRET
   const feishu = appId !== undefined && appSecret !== undefined
@@ -255,6 +272,7 @@ async function cmdServe(): Promise<void> {
     qabot,
     tickets,
     kb,
+    ...repositories.knowledgeSearch === undefined ? {} : { knowledgeSearch: repositories.knowledgeSearch },
     staff,
     audit,
     outbox,

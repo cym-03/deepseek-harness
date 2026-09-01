@@ -7,18 +7,28 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import type { KnowledgeSearch } from '../kb/search.ts'
 import { KbStore } from '../kb/store.ts'
 
 export const name = 'qabot-kb'
 export const inject = ['tools']
 
 export interface Config {
-  /** 知识库 SQLite 文件路径。 */
-  dbPath: string
+  /** 与管理端共享的知识检索提供者。 */
+  search?: KnowledgeSearch
+  /** SQLite fallback used outside MySQL mode. */
+  dbPath?: string
 }
 
 export function apply(ctx: Context, config: Config): void {
-  const store = new KbStore(config.dbPath)
+  const fallback = config.search === undefined && config.dbPath !== undefined ? new KbStore(config.dbPath) : undefined
+  const search = config.search ?? fallback
+  if (search === undefined) throw new Error('qabot-kb 需要 search 或 dbPath')
+  if (fallback !== undefined) {
+    ctx.effect(() => () => {
+      fallback.dispose()
+    })
+  }
   ctx.tools.register(defineTool({
     name: 'kb_search',
     description:
@@ -40,7 +50,7 @@ export function apply(ctx: Context, config: Config): void {
       render: (_args, value) => [{ type: 'text', text: value }],
     },
     async execute(args, _exec) {
-      return store.search(args.query, args.limit ?? 5)
+      return search.search(args.query, args.limit ?? 5)
     },
   }))
 }

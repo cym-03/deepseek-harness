@@ -15,7 +15,7 @@ Portal App.vue (smart-qa/qa-admin) ──HTTP──→ Qabot service (node:http,
                           │ In-process dsh Qabot engine        │
                           │  agent-spine + llm-deepseek        │
                           │  kb_search + request_human_handoff │
-                          │  ticket (SQLite) + session         │
+                          │  MySQL repositories + session log  │
                           └───────────────────┬───────────────┘
                                               └─→ Feishu notification adapter
 ```
@@ -153,9 +153,9 @@ The deployed business database is MySQL `hr_system`. MySQL migrations use consec
 pnpm --filter @deepseek-ai/dsh-qabot run db:migrate:mysql
 ```
 
-The MySQL provider implements Conversation, Ticket, Audit, and Outbox repositories. It also projects every knowledge snapshot into `knowledge_sources`, documents, versions, chunks, assets, and embeddings at startup and after synchronization, review, publication, or removal. Projection copies stored vectors without requesting embeddings; `kb.db` remains the rebuildable FTS and similarity-search cache during the repository cutover. Business dates use Asia/Shanghai `DATETIME(3)` columns so operators see `YYYY-MM-DD HH:mm:ss.SSS` values directly; repositories convert them to Unix milliseconds at the application boundary. Configure `QABOT_DATABASE_BACKEND=mysql` and `QABOT_MYSQL_URL`; startup applies pending migrations. Real integration tests read only `QABOT_TEST_MYSQL_URL` and must not remain pointed at production.
+The MySQL provider stores conversations, messages, tickets, audit records, Outbox rows, service-team configuration, knowledge submissions, knowledge versions and vectors, query-vector cache entries, and raw DSH model events in `hr_system`. Model retrieval reads published effective MySQL versions directly; `kb.db` is a rebuildable ingestion index for synchronization, review, and embedding calculation. Projection copies stored vectors without requesting embeddings, while repeated semantic queries reuse MySQL query vectors by query hash and model key. Business dates use Asia/Shanghai `DATETIME(3)` columns so operators see `YYYY-MM-DD HH:mm:ss.SSS` values directly; repositories convert them to Unix milliseconds at the application boundary. Configure `QABOT_DATABASE_BACKEND=mysql` and `QABOT_MYSQL_URL`; startup applies pending migrations. Real integration tests read only `QABOT_TEST_MYSQL_URL` and must not remain pointed at production.
 
-Employee, assistant, and public service-desk messages are projected into MySQL `conversation_messages` with stable source identifiers. DSH session events remain the model-visible history, while portal timeline reads use the durable business projection and never delete stored messages after an empty session-file read. Run `pnpm --filter @deepseek-ai/dsh-qabot run db:project-messages` once to backfill existing conversations; the command is idempotent and does not invoke language or embedding models.
+Employee, assistant, and public service-desk messages are projected into MySQL `conversation_messages` with stable source identifiers. `dsh_model_sessions` and `dsh_model_session_events` retain the complete model-visible history needed for resume, while portal timeline reads use the durable business projection. Migration 11 imports legacy JSONL sessions and service-team rows once, records completion in `qabot_data_imports`, and retains the source files as rollback evidence. Run `pnpm --filter @deepseek-ai/dsh-qabot run db:project-messages` only when an older deployment still needs its conversation projection backfilled; the command is idempotent and does not invoke language or embedding models.
 
 MySQL `conversation_message_reads` stores independent employee and service-desk read positions. Conversation lists expose role-filtered `unreadCount` values, and an authorized detail read advances only that viewer's position. Migration `009_conversation_message_reads.sql` records existing messages as the rollout baseline so only later replies begin unread accounting.
 
@@ -171,7 +171,7 @@ Employees submit satisfaction scores in the portal conversation rather than Feis
 
 ### Logging
 - Console and timestamped `apps/qabot/data/qabot.log` output.
-- Runtime data lives under `apps/qabot/data/`, including `kb.db`, local development repositories, sources, and staff configuration.
+- `apps/qabot/data/` contains the rebuildable ingestion index, local development repositories, Feishu source configuration, logs, and retained pre-MySQL migration evidence. Production business state lives in `hr_system`.
 
 ### Windows scheduled startup
 ```powershell
@@ -191,7 +191,7 @@ Allow inbound TCP port 3100 in Windows Firewall when the host policy requires it
 
 - **Relay balance:** the configured relay can return `Insufficient Balance`, which closes model streams until provider balance is available.
 - **Empty-response retry:** a relay-induced empty turn retries once; a second empty result returns a readable temporary-service error and hides the retry instruction from the transcript.
-- **Persistent incremental vectors:** `kb.db` retains text and visual rows. Only a changed content hash, model, or dimension invalidates a row; `vision_assets` retains image bytes across model changes. With MySQL enabled, the same rows and image bytes are projected into `hr_system` without recalculation.
+- **Persistent incremental vectors:** MySQL retains production text and visual vectors; the ingestion index recalculates only when content hash, model, or dimension changes and projects those rows without a second model call. Query-vector caching avoids repeated embedding calls for the same normalized question and model.
 - **Knowledge publication:** offline, not-yet-effective, and expired documents are excluded from keyword, text-vector, visual-vector, and returned-image retrieval. Reactivation reuses unchanged vectors.
 - **Visual retrieval:** `VISION_EMBED_MODEL=qwen3-vl-embedding` downloads Feishu document images and enables text-to-image retrieval. The application needs permission to download cloud-document media.
 - **Feishu permission:** the application needs scopes such as `im:message:send_as_bot`; failed notifications degrade to logs.

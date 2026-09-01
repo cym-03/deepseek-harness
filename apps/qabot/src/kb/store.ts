@@ -56,6 +56,7 @@ export interface KnowledgePublicationWindow {
 export interface KnowledgeStorageSnapshot {
   documents: KnowledgeStorageDocument[]
   versions: KnowledgeStorageVersion[]
+  submissions: Array<{ id: number; url: string; title: string; status: string; createdAt: number }>
 }
 
 export interface KnowledgeStorageDocument {
@@ -865,6 +866,7 @@ export class KbStore {
         expiresAt: row.expires_at,
         reviewedBy: row.reviewed_by,
       })),
+      submissions: this.listPending(),
     }
   }
 

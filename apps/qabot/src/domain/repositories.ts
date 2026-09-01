@@ -4,6 +4,7 @@ import type { Conversation } from '../conversation/store.ts'
 import type { OutboxEventType, OutboxMessage } from '../integration/outbox.ts'
 import type { Ticket, TicketStatus } from '../ticket/store.ts'
 import type { KbMediaRef } from '../kb/store.ts'
+import type { StaffMember } from '../staff/store.ts'
 
 export type Awaitable<T> = T | Promise<T>
 
@@ -92,6 +93,14 @@ export interface TicketRepository {
 export interface AuditRepository {
   append(input: Omit<AuditRecord, 'id' | 'createdAt'>): Awaitable<AuditRecord>
   list(limit?: number): Awaitable<AuditRecord[]>
+}
+
+export interface StaffRepository {
+  list(): Awaitable<StaffMember[]>
+  notifyTargets(group?: string): Awaitable<string[]>
+  groups(): Awaitable<string[]>
+  upsert(member: { openId: string; group?: string; name?: string; active?: boolean }): Awaitable<void>
+  remove(openId: string, group?: string): Awaitable<boolean>
 }
 
 export interface OutboxRepository {

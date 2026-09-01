@@ -274,6 +274,15 @@ export class MysqlKnowledgeProjection {
           }
         }
       }
+      await connection.execute('DELETE FROM knowledge_submissions')
+      for (const submission of snapshot.submissions) {
+        await connection.execute(`
+          INSERT INTO knowledge_submissions (
+            submission_id, source_url, title, status, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?)
+        `, [submission.id, submission.url, submission.title, submission.status,
+          toMysqlDate(submission.createdAt), toMysqlDate(now)])
+      }
       await connection.commit()
       const [[embeddingRow], [assetRow]] = await Promise.all([
         this.pool.execute<NumberRow[]>('SELECT COUNT(*) AS value FROM knowledge_embeddings'),
