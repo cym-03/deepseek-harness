@@ -35,6 +35,19 @@ async function tenantToken(appId: string, appSecret: string): Promise<string> {
   return body.tenant_access_token
 }
 
+/** Try the direct media stream, then Feishu's temporary URL for 403 variants. */
+async function downloadMedia(auth: Record<string, string>, token: string): Promise<Response> {
+  const direct = await fetch(`${API_BASE}/drive/v1/medias/${token}/download`, { headers: auth })
+  if (direct.status !== 403) return direct
+  const temporary = await fetch(`${API_BASE}/drive/v1/medias/batch_get_tmp_download_url?file_tokens=${encodeURIComponent(token)}`, { headers: auth })
+  if (!temporary.ok) return direct
+  const body = await temporary.json() as { data?: { tmp_download_urls?: string[] } }
+  const url = body.data?.tmp_download_urls?.[0]
+  if (url === undefined) return direct
+  const resolved = await fetch(url)
+  return resolved.ok ? resolved : direct
+}
+
 /** 用 qwen-vl 提取图片文字。 */
 async function ocrImage(base64Data: string, mime: string): Promise<string> {
   const base = (process.env.EMBED_BASE_URL ?? '').replace(/\/+$/, '')
@@ -127,7 +140,7 @@ export async function storeVisionAssets(
   for (const hint of hints) {
     const source = `${sourceBase}:vision:${hint.token}`
     if (kb.hasVisionAssetSource(source)) continue
-    const response = await fetch(`${API_BASE}/drive/v1/medias/${hint.token}/download`, { headers: auth })
+    const response = await downloadMedia(auth, hint.token)
     if (!response.ok) {
       failed += 1
       if (firstFailure === '') {
