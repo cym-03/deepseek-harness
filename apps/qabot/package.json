@@ -1,7 +1,7 @@
 {
   "name": "@deepseek-ai/dsh-qabot",
   "description": "公司内部智能问答机器人网关：进程内嵌入 DeepSeek Harness agent，对接飞书，管理工单",
-  "version": "0.1.0-rc.5",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "license": "MIT",
