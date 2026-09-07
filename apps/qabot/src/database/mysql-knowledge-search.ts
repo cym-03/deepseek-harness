@@ -4,7 +4,15 @@ import { createHash } from 'node:crypto'
 import { anyCosine, embedModelKey, embedTexts, embeddingsReady, type EmbedVector } from '../kb/embed.ts'
 import { embedVisionText, visionEmbeddingsConfigured, visionModelKey } from '../kb/vision-embed.ts'
 import { toMysqlDate } from './mysql-time.ts'
-import { mergeMentionedVisionMatches, selectVisionMatches, visionTitleMatchesContext, type KnowledgeMediaSearch, type KnowledgeSearch, type KnowledgeVisionStatus } from '../kb/search.ts'
+import {
+  mergeMentionedVisionMatches,
+  removeSupersededBoardHints,
+  selectVisionMatches,
+  visionTitleMatchesContext,
+  type KnowledgeMediaSearch,
+  type KnowledgeSearch,
+  type KnowledgeVisionStatus,
+} from '../kb/search.ts'
 import type { KbMediaRef } from '../kb/store.ts'
 
 interface KnowledgeHitRow extends RowDataPacket {
@@ -61,7 +69,7 @@ export class MysqlKnowledgeSearch implements KnowledgeSearch, KnowledgeMediaSear
   async search(query: string, limit = 5): Promise<string> {
     const normalized = query.trim()
     if (normalized === '') return '（空查询）'
-    const rows = await this.activeChunks()
+    const rows = removeSupersededBoardHints(await this.activeChunks())
     const queryTerms = terms(normalized)
     const keywordHits = rows.map(row => ({ row, score: keywordScore(row, queryTerms) }))
       .filter(hit => hit.score > 0)

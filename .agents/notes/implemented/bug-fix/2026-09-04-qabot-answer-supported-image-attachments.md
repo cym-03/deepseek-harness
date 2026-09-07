@@ -12,6 +12,8 @@ Visual retrieval scored only the employee question. An answer could identify cap
 
 Qabot keeps the question-based visual-vector search and then prepends active assets whose explicit image caption or board title appears in the generated answer. Automatic results may come from any active source, but their titles must share a specific, non-generic term with the question or answer. They also require a strong score of `0.45`, or two captioned results above `0.40` whose scores differ by at most `0.02`; explicit answer mentions remain eligible below those thresholds. The deterministic merge reuses the existing asset rows and query vector, deduplicates by asset ID, preserves mention order, and applies the configured result limit.
 
+Text retrieval requests more candidates than it returns, moves OCR-backed board content ahead of other selected rows, and removes a board placeholder when the same candidate set contains OCR text for that board. The system prompt requires the model to use recognized board text and prohibits describing that board as unparsed.
+
 Generic document-image labels do not qualify as mentions because a cited document title can belong to many uncaptioned images. The assistant text is used only to select already-indexed assets; it does not trigger another embedding request.
 
 ## Alternatives considered
@@ -22,4 +24,4 @@ Generic document-image labels do not qualify as mentions because a cited documen
 
 ## Consequences
 
-An answer that names a captioned image displays that image before high-confidence vector-only matches. A process diagram that overlaps only through generic terms such as “application,” “approval,” or “process,” weakly related assets, and generic unlabeled assets remain excluded. Relevant images from another source remain eligible. Each employee question still performs at most the existing cached visual-query lookup or one visual embedding request.
+An answer that names a captioned image displays that image before high-confidence vector-only matches, and available board OCR text takes precedence over its placeholder. A process diagram that overlaps only through generic terms such as “application,” “approval,” or “process,” weakly related assets, and generic unlabeled assets remain excluded. Relevant images from another source remain eligible. Each employee question still performs at most the existing cached visual-query lookup or one visual embedding request.

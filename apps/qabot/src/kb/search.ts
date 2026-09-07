@@ -29,6 +29,25 @@ export interface MentionedVisionCandidate<T> {
   description: string
 }
 
+function boardTopic(title: string): string {
+  return normalizedVisualText(title
+    .replace(/^(?:画板提示|画板)[:：]\s*/, '')
+    .replace(/[（(]画板文字[）)]$/, ''))
+}
+
+/** Removes a board placeholder when the same candidate set contains its OCR text. */
+export function removeSupersededBoardHints<T extends { title: string; content: string }>(rows: readonly T[]): T[] {
+  const ocrTopics = new Set(rows.flatMap((row) => {
+    const hasOcr = /画板识别文字：\S/.test(row.content) || /[（(]画板文字[）)]$/.test(row.title)
+    return hasOcr ? [boardTopic(row.title)] : []
+  }))
+  return rows
+    .filter(row => !/^画板提示[:：]/.test(row.title) || !ocrTopics.has(boardTopic(row.title)))
+    .map((row, index) => ({ row, index, ocr: /画板识别文字：\S/.test(row.content) }))
+    .sort((left, right) => Number(right.ocr) - Number(left.ocr) || left.index - right.index)
+    .map(item => item.row)
+}
+
 function explicitMediaLabels(title: string, description: string): string[] {
   const captionLabels = [...description.matchAll(/图片说明：([^\n]+)/g)]
     .flatMap(match => match[1] === undefined ? [] : [match[1].trim()])

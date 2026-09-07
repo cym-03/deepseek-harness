@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-09-04-qabot-answer-supported-image-attachments.md
-2026-09-04-qabot-answer-supported-image-attachments.md: 953f9cdd5852012ac60f438c8188ffc5a76de95a
-2026-09-04-qabot-answer-supported-image-attachments.zh.md: 38ffc806274553a0965b862965936fb59cde82c5
+2026-09-04-qabot-answer-supported-image-attachments.md: 630c54e8748ba4aaaa156ce8d88c089423acd912
+2026-09-04-qabot-answer-supported-image-attachments.zh.md: c492294c35af2a393a3605854ec21e946cbf74bb

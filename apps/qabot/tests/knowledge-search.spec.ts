@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { mergeMentionedVisionMatches, selectVisionMatches, visionTitleMatchesContext } from '../src/kb/search.ts'
+import {
+  mergeMentionedVisionMatches,
+  removeSupersededBoardHints,
+  selectVisionMatches,
+  visionTitleMatchesContext,
+} from '../src/kb/search.ts'
 
 const originalThresholds = {
   strong: process.env.VISION_MEDIA_STRONG_SCORE,
@@ -111,5 +116,18 @@ describe('answer-supported visual results', () => {
       '根据「🚀发展历程」章节，公司于 2012 年成立。',
       3,
     )).toEqual([candidates[4]!.item])
+  })
+})
+
+describe('board OCR text retrieval', () => {
+  it('removes a placeholder when the same board has usable OCR text', () => {
+    const rows = [
+      { title: '员工手册', content: '二、发展历程' },
+      { title: '画板提示：二、发展历程', content: '【画板提示】画板内容未解析为文字' },
+      { title: '画板：二、发展历程', content: '画板识别文字：2012年公司成立' },
+      { title: '图片提示：全员合照', content: '图片说明：2025年全员合照' },
+    ]
+
+    expect(removeSupersededBoardHints(rows)).toEqual([rows[2], rows[0], rows[3]])
   })
 })

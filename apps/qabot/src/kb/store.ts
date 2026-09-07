@@ -15,7 +15,12 @@ import {
   visionEmbeddingsConfigured,
   visionModelKey,
 } from './vision-embed.ts'
-import { mergeMentionedVisionMatches, selectVisionMatches, visionTitleMatchesContext } from './search.ts'
+import {
+  mergeMentionedVisionMatches,
+  removeSupersededBoardHints,
+  selectVisionMatches,
+  visionTitleMatchesContext,
+} from './search.ts'
 
 export interface KbChunk {
   /** 文档标题。 */
@@ -971,10 +976,11 @@ export class KbStore {
   async search(query: string, limit = 5): Promise<string> {
     const q = query.trim()
     if (q === '') return '（空查询）'
-    const kwHits = this.searchKeywords(q, limit)
+    const candidateLimit = Math.max(limit * 2, limit + 3)
+    const kwHits = this.searchKeywords(q, candidateLimit)
     const [vecHits, visionHits] = await Promise.all([
-      this.searchVector(q, limit),
-      this.searchVision(q, limit).catch((error: unknown) => {
+      this.searchVector(q, candidateLimit),
+      this.searchVision(q, candidateLimit).catch((error: unknown) => {
         console.error('[kb-vision] 查询失败，降级为文本检索:', error instanceof Error ? error.message : error)
         return []
       }),
@@ -982,7 +988,7 @@ export class KbStore {
     // 合并：文本语义、视觉语义优先，关键词命中补充去重。
     const seen = new Set<number>()
     const merged: DocRow[] = []
-    for (const row of [...vecHits, ...visionHits, ...kwHits]) {
+    for (const row of removeSupersededBoardHints([...vecHits, ...visionHits, ...kwHits])) {
       if (merged.length >= limit) break
       if (seen.has(row.id)) continue
       seen.add(row.id)
