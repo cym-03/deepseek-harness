@@ -30,7 +30,8 @@
     "@deepseek-ai/schemastery": "workspace:^",
     "@larksuiteoapi/node-sdk": "^1.31.0",
     "mysql2": "^3.24.2",
-    "postgres": "^3.4.9"
+    "postgres": "^3.4.9",
+    "sharp": "^0.35.3"
   },
   "devDependencies": {
     "@types/node": "^22.20.0",

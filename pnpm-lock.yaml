@@ -397,6 +397,9 @@ importers:
       postgres:
         specifier: ^3.4.9
         version: 3.4.9
+      sharp:
+        specifier: ^0.35.3
+        version: 0.35.3(@types/node@22.20.0)
     devDependencies:
       '@types/node':
         specifier: ^22.20.0

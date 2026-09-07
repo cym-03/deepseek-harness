@@ -86,4 +86,28 @@ describe('conversation timeline projection', () => {
     expect(repository.unreadCounts(['session-1'], 'employee:test', ['assistant', 'human']))
       .toEqual(new Map([['session-1', 1]]))
   })
+
+  it('shows an employee handoff message once through its durable ticket reply', async () => {
+    const events = [{
+      type: 'user/message',
+      seq: 7,
+      time: 100,
+      data: { content: [{ type: 'text', text: '【人工接管期间员工消息】请帮我补办门禁卡' }] },
+    }] as unknown as SessionEvent[]
+    const qabot = { transcript: vi.fn().mockResolvedValue(events) } as unknown as Qabot
+    const tickets = { repliesBySession: vi.fn().mockResolvedValue([{
+      id: 11,
+      message: '【员工消息】请帮我补办门禁卡',
+      createdAt: 100,
+    }]) } as unknown as TicketRepository
+    const kb = { conversationMedia: vi.fn().mockReturnValue(new Map()) } as unknown as KbStore
+    const repository = new MemoryMessageRepository()
+
+    const timeline = await loadConversationTimeline('session-1', qabot, tickets, kb, repository)
+
+    expect(timeline.messages).toEqual([
+      expect.objectContaining({ role: 'user', text: '请帮我补办门禁卡' }),
+    ])
+    expect(repository.count('session-1')).toBe(1)
+  })
 })

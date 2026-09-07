@@ -4,7 +4,7 @@
 
 基于 DeepSeek Harness（进程内嵌入）构建的公司内部智能问答服务，供**员工服务台门户**（NestJS）薄代理调用。
 
-当前完成阶段 0 基线和阶段 1 的首个安全切片：持久化文本/视觉索引、门户签名身份、员工会话资源授权、同会话串行执行和版本化会话 API。工单、知识管理和运营接口仍通过兼容 `/api` 提供，迁移到领域模块后再移除兼容接口。
+当前基线包含持久化文本/视觉索引、门户签名身份、员工会话资源授权、同会话串行执行、版本化会话 API，以及以 MySQL 为权威配置的在线知识源管理。工单和运营接口仍通过兼容 `/api` 提供，迁移到领域模块后再移除兼容接口。
 
 ## 架构
 
@@ -48,8 +48,11 @@ DEEPSEEK_BASE_URL=http://<relay>/v1 pnpm --filter @deepseek-ai/dsh-qabot run dev
 | `GET /v1/agent/tickets/:id` | 有权访问的工单详情和人工回复 |
 | `POST /v1/agent/tickets/:id/accept` | 使用签名身份中的 `employeeId` 接单，提交 `{ version }` |
 | `POST /v1/agent/tickets/:id/reply` | 提交 `{ message, version }`，追加公开回复并进入 `waiting_employee` |
-| `POST /v1/knowledge/versions/:id/publish` | 发布已审核版本，可提交 `{ effectiveAt, expiresAt }` |
-| `POST /v1/knowledge/:source/publication` | 设置 `{ online }`，不删除版本或向量 |
+| `GET /v1/knowledge/sources` | 列出活跃在线知识源及其同步健康状态 |
+| `POST /v1/knowledge/sources` | 新增 `{ title, url, group }` 并触发首次同步 |
+| `PATCH /v1/knowledge/sources/:id` | 修改知识源标题或维护分组 |
+| `POST /v1/knowledge/sources/:id/sync` | 立即同步单个知识源 |
+| `DELETE /v1/knowledge/sources/:id` | 软移除知识源并停止同步和召回 |
 | `GET /v1/system/audit` | SystemAdmin 查询特权操作审计记录 |
 
 ## HTTP 接口
@@ -62,9 +65,6 @@ DEEPSEEK_BASE_URL=http://<relay>/v1 pnpm --filter @deepseek-ai/dsh-qabot run dev
 | `POST /api/tickets/:id/accept` | 接单 `{ assignee }` → in_service |
 | `POST /api/tickets/:id/reply` | 人工回复 `{ message }`（经飞书发给员工） |
 | `POST /api/tickets/:id/close` | 关闭 `{ satisfaction? }` |
-| `GET /api/kb` | 知识库条目 |
-| `POST /api/kb/ingest` | 手工录入 `{ title, content }` |
-| `DELETE /api/kb/:source` | 删除知识库条目 |
 | `GET /api/stats` | 服务统计 |
 
 ## 鉴权
@@ -110,8 +110,9 @@ DEEPSEEK_BASE_URL=http://<relay>/v1 node --import tsx/esm apps/qabot/src/bin.ts 
 | `DEEPSEEK_BASE_URL` | 必填 | 中转网关（禁止写 .env，必须启动时导出） |
 | `QABOT_PORT` | 3100 | 服务端口 |
 | `QABOT_HOST` | 0.0.0.0 | 监听地址（内网访问用 0.0.0.0） |
-| `QABOT_SYNC_INTERVAL_MINUTES` | 30 | 知识库定时同步（0 关闭） |
+| `QABOT_SYNC_INTERVAL_MINUTES` | 5 | 知识库定时同步（0 关闭） |
 | `QABOT_API_TOKEN` | 必填 | 鉴权头 X-Qabot-Token；所有环境强制（缺失拒绝启动）。start-qabot.bat 内置默认值，根 .env 已写入同值 |
+| `QABOT_PORTAL_INTERNAL_URL` | `http://127.0.0.1:3000/api/internal/qabot` | 按提交人身份同步飞书知识时使用的门户凭证代理地址 |
 | `QABOT_IDENTITY_SECRET` | 必填 | 校验门户短时签名身份令牌；不得提交到仓库 |
 | `QABOT_MAX_BODY_BYTES` | 1048576 | HTTP 请求体上限 |
 | `QABOT_MAX_MESSAGE_LENGTH` | 8000 | 单条员工消息字符上限 |
@@ -153,7 +154,9 @@ QABOT_DATABASE_URL=postgres://user:password@host:5432/qabot pnpm --filter @deeps
 pnpm --filter @deepseek-ai/dsh-qabot run db:migrate:mysql
 ```
 
-MySQL 后端把会话、消息、工单、审计记录、Outbox、服务人员配置、知识提交记录、知识版本、来源图片二进制与向量、查询向量缓存和 DSH 模型原始事件统一保存到 `hr_system`。知识录入会先补齐文本和图片向量，再投影已审核版本。模型检索直接读取 MySQL 中已发布且处于生效期内的版本；每个非空员工问题都会自动合并文本和相关图片召回，不要求问题包含“图片”“图表”等关键词。`kb.db` 是用于同步、审核和向量计算的可重建录入索引。投影只复制已有向量，不会再次请求 embedding；只有存在可用图片候选时才生成视觉查询向量，并按规范化问题哈希与模型标识复用。业务日期使用 Asia/Shanghai 时区的 `DATETIME(3)` 字段，运维人员可以直接看到 `年-月-日 时:分:秒.毫秒`；Repository 在应用边界把日期转换为 Unix 毫秒。部署配置为 `QABOT_DATABASE_BACKEND=mysql` 与 `QABOT_MYSQL_URL`；启动会自动执行待处理迁移。真实集成测试只读取 `QABOT_TEST_MYSQL_URL`，不得将其长期指向生产数据库。
+MySQL 后端把会话、消息、工单、审计记录、Outbox、服务人员配置、在线知识源配置、内部知识版本、来源图片二进制与向量、查询向量缓存和 DSH 模型原始事件统一保存到 `hr_system`。知识源首次同步成功后立即参与员工问答；后续成功同步会原子替换当前内容，更新失败则继续使用上一次可用内容。`kb.db` 仅作为解析同步内容和计算缺失向量的可重建工作索引，不再是生产知识源注册表或检索权威源。投影只复制已有向量，不会再次请求 embedding；模型检索读取 MySQL 中的活跃来源，并为每个非空员工问题自动合并文本和相关图片召回。只有存在可用图片候选时才生成视觉查询向量，并按规范化问题哈希与模型标识复用。业务日期使用 Asia/Shanghai 时区的 `DATETIME(3)` 字段，运维人员可以直接看到 `年-月-日 时:分:秒.毫秒`；Repository 在应用边界把日期转换为 Unix 毫秒。部署配置为 `QABOT_DATABASE_BACKEND=mysql` 与 `QABOT_MYSQL_URL`；启动会自动执行待处理迁移。真实集成测试只读取 `QABOT_TEST_MYSQL_URL`，不得将其长期指向生产数据库。
+
+图片附件会合并问题的缓存视觉向量结果，以及生成回答明确点名的有效带说明图片或画板。回答辅助选择不会再次请求向量，通用文档图片标签也不会把被引用来源中的所有无说明图片都附加进来。
 
 员工、智能助手与人工客服公开消息使用稳定来源标识投影到 MySQL `conversation_messages`。`dsh_model_sessions` 与 `dsh_model_session_events` 保存恢复会话所需的完整模型历史，门户时间线读取持久业务投影。迁移 11 一次性导入旧 JSONL 会话和服务人员记录，在 `qabot_data_imports` 记录完成状态，并保留源文件作为回退证据。只有旧部署仍缺少消息投影时才需执行 `pnpm --filter @deepseek-ai/dsh-qabot run db:project-messages`；该命令具备幂等性，不会调用语言模型或向量模型。
 
@@ -168,6 +171,8 @@ MySQL `conversation_message_reads` 分别保存员工端和客服端的已读位
 | `VISION_EMBED_BASE_URL` | `https://dashscope.aliyuncs.com/api/v1` | DashScope 多模态 API 地址 |
 | `VISION_EMBED_DIMENSION` | 1024 | 视觉向量维度；修改后已有视觉向量会自动增量重算 |
 | `VISION_EMBED_MAX_PER_SYNC` | 20 | 单次同步最多生成的缺失或失效视觉向量数量 |
+| `VISION_OCR_MODEL` | `qwen-vl-ocr` | 在知识同步时提取变化画板文字的 OpenAI 兼容模型 |
+| `VISION_OCR_MAX_TOKENS` | 4096 | 单次画板 OCR 最大输出；密集画板达到上限时拆为重叠区域识别 |
 
 ### 日志
 - 控制台 + `apps/qabot/data/qabot.log`（带时间戳/级别）
@@ -192,8 +197,8 @@ schtasks /Delete /TN "qabot-service" /F
 - **中转余额**：`192.168.10.61:3000` 间歇 `Insufficient Balance` → 偶发 STREAM_CLOSED，需充值。
 - **空回复自动重试**：中继异常导致回合空回复时自动重试一次，仍空则返回「模型服务暂时异常，请稍后重试」，不再让用户看到空白（重试的系统提示在会话转录中隐藏）。
 - **向量索引增量持久化**：MySQL 保存生产文本与视觉向量；录入索引仅在内容哈希、模型或维度变化时重新计算，再把结果投影到 `hr_system`，不会二次调用模型。查询向量缓存避免同一规范化问题和模型重复请求 embedding。
-- **知识上下架**：已下架、未到生效时间和已过失效时间的文档不会进入关键词、文本向量、视觉向量或图片返回。重新上线会复用未变化的向量。
-- **视觉检索**：设置 `VISION_EMBED_MODEL=qwen3-vl-embedding` 后，飞书文档图片会在知识录入时下载并增量生成独立视觉向量，图片二进制和向量统一保存到 MySQL。每个非空员工问题都会自动召回相关图片并与文本结果一起呈现，不要求用户明确说“图片”或“图表”。查询向量会持久缓存；没有可用图片候选时不会调用视觉查询模型。
-- **飞书媒体访问**：下载文档内嵌图片要求已发布的应用具有 `drive:drive:readonly`，并能访问对应知识空间或文档。媒体下载被拒绝时，已审核文本仍可使用，但不会建立图片资产或消耗视觉模型额度。
+- **在线知识源**：后台人员直接添加飞书链接；每个来源都使用提交人的飞书用户授权同步，授权缺失时不会回退到机器人或其他员工身份。系统支持直接提交 Docx、飞书电子表格和多维表格链接，也支持底层为这些类型的知识库节点。电子表格保留工作表名、列表头和每行字段名；链接指定一个工作表时只建立该工作表的索引。主管再次提交迁移来源的链接时可将来源认领到本人。固定分组只控制维护归属，不限制员工可见范围。默认每五分钟同步一次；内容更新成功时会原子归档此前的已发布版本，检索只读取每份文档中版本号最大的已发布版本。软移除会立即停止文本、向量和图片召回，重新添加同一链接时复用未变化的数据。
+- **视觉检索**：设置 `VISION_EMBED_MODEL=qwen3-vl-embedding` 后，飞书文档图片和嵌入画板会在知识录入时下载并增量生成独立视觉向量，素材二进制和向量统一保存到 MySQL。画板使用所在章节作为检索说明，并在每次来源同步时重新下载快照。`VISION_OCR_MODEL` 会在录入阶段提取画板文字并写入可检索知识块；快照内容哈希不变时会同时复用识别文字和视觉向量，不再请求模型。快照变化时只替换该画板的当前素材并重新生成它的识别文字和向量。密集画板只有在整图达到输出上限后才拆成重叠区域识别；空白区域不产生文字，最小区域的结构化结果即使结尾不完整，也会保留其中已经完整返回的文字字段。SVG 画板会先转换为 PNG，超过模型请求限制的素材才会缩放压缩。员工提问不需要明确包含“图片”“图表”或“画板”，文本检索会召回画板文字，视觉检索会附加相关素材。查询向量会持久缓存；没有可用视觉候选时不会调用视觉查询模型。
+- **飞书媒体访问**：普通内嵌图片需要 `docs:document.media:download`，嵌入画板需要 `board:whiteboard:node:read`，并且知识源提交人必须仍可访问对应文档或画板。门户加密保存该用户的可续期 OAuth 凭证，只向 Qabot 提供短期访问令牌。普通图片同步会携带父 Docx 上下文，并依次尝试素材下载、原始素材预览流（`preview_type=16`）和临时链接；画板通过飞书画板图片导出接口下载。视觉素材下载被拒绝时，最近一次同步成功的文本和既有素材仍可使用，来源行会记录告警，并且不会消耗视觉模型额度。MySQL 投影会保留未变化素材的 ID，使会话历史中已关联的图片持续可读。自动视觉检索要求素材标题与问题或回答共享具体的非通用主题词，同时要求单个结果达到 `0.45`，或两个相互印证的结果都达到 `0.40` 且差值不超过 `0.02`。匹配素材可以来自任意活跃知识源，回答明确点名的图片仍可展示。部署可通过 `VISION_MEDIA_STRONG_SCORE`、`VISION_MEDIA_CLUSTER_SCORE` 和 `VISION_MEDIA_CLUSTER_MARGIN` 调整阈值。
 - **飞书权限**：应用需开通 `im:message:send_as_bot`（发消息）等权限，否则发送会降级为仅记日志。
 - 工具注册必须 `defineTool`（裸 register 的 parameters 不转 JSON Schema，中继拒收）。

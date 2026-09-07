@@ -237,6 +237,7 @@ interface TicketRow {
   service_start: string | number | null
   service_end: string | number | null
   satisfaction: number | null
+  satisfaction_comment: string | null
   handoff_reason: string | null
   created_at: string | number
   updated_at: string | number
@@ -260,6 +261,7 @@ function toTicket(row: TicketRow): Ticket {
     serviceStart: nullableNumber(row.service_start),
     serviceEnd: nullableNumber(row.service_end),
     satisfaction: row.satisfaction,
+    satisfactionComment: row.satisfaction_comment,
     handoffReason: row.handoff_reason,
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
@@ -466,14 +468,14 @@ export class PostgresTicketRepository implements TicketRepository {
     return rows.length > 0
   }
 
-  async rate(ticketId: number, satisfaction: number, expectedVersion?: number): Promise<boolean> {
+  async rate(ticketId: number, satisfaction: number, comment: string | null, expectedVersion?: number): Promise<boolean> {
     const rows = expectedVersion === undefined
       ? await this.sql<{ id: string | number }[]>`
-          UPDATE tickets SET satisfaction = ${satisfaction}, updated_at = ${Date.now()}, version = version + 1
+          UPDATE tickets SET satisfaction = ${satisfaction}, satisfaction_comment = ${comment}, updated_at = ${Date.now()}, version = version + 1
           WHERE id = ${ticketId} RETURNING id
         `
       : await this.sql<{ id: string | number }[]>`
-          UPDATE tickets SET satisfaction = ${satisfaction}, updated_at = ${Date.now()}, version = version + 1
+          UPDATE tickets SET satisfaction = ${satisfaction}, satisfaction_comment = ${comment}, updated_at = ${Date.now()}, version = version + 1
           WHERE id = ${ticketId} AND version = ${expectedVersion} AND status IN ('resolved', 'closed')
             AND satisfaction IS NULL RETURNING id
         `

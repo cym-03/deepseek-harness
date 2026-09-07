@@ -15,6 +15,7 @@ import {
   visionEmbeddingsConfigured,
   visionModelKey,
 } from './vision-embed.ts'
+import { mergeMentionedVisionMatches, selectVisionMatches, visionTitleMatchesContext } from './search.ts'
 
 export interface KbChunk {
   /** 文档标题。 */
@@ -364,11 +365,60 @@ export class KbStore {
     `).get(source) !== undefined
   }
 
+  /** Returns the stored bytes identity and searchable description for one visual source. */
+  visionAssetState(source: string): { contentHash: string; description: string } | undefined {
+    const row = this.db.prepare(`
+      SELECT a.content_hash, d.content
+      FROM docs d
+      JOIN vision_assets a ON a.doc_id = d.id
+      WHERE d.source = ?
+      ORDER BY d.id DESC
+      LIMIT 1
+    `).get(source) as { content_hash: string; content: string } | undefined
+    return row === undefined ? undefined : { contentHash: row.content_hash, description: row.content }
+  }
+
   /** 删除一个文档来源中已不存在的图片及其文本、视觉向量。 */
   pruneVisionAssets(sourceBase: string, activeSources: ReadonlySet<string>): number {
     const rows = this.db.prepare(
       'SELECT id, source FROM docs WHERE source LIKE ?',
     ).all(`${sourceBase}:vision:%`) as unknown as Array<{ id: number; source: string }>
+    const stale = rows.filter(row => !activeSources.has(row.source))
+    const remove = this.db.prepare('DELETE FROM docs WHERE id = ?')
+    this.db.exec('BEGIN;')
+    try {
+      for (const row of stale) remove.run(row.id)
+      this.db.exec('COMMIT;')
+    } catch (error) {
+      this.db.exec('ROLLBACK;')
+      throw error
+    }
+    return stale.length
+  }
+
+  /** Removes searchable board-text chunks whose board no longer exists in the parent document. */
+  pruneBoardTexts(sourceBase: string, activeSources: ReadonlySet<string>): number {
+    const rows = this.db.prepare(
+      'SELECT id, source FROM docs WHERE source LIKE ?',
+    ).all(`${sourceBase}:board-text:%`) as unknown as Array<{ id: number; source: string }>
+    const stale = rows.filter(row => !activeSources.has(row.source))
+    const remove = this.db.prepare('DELETE FROM docs WHERE id = ?')
+    this.db.exec('BEGIN;')
+    try {
+      for (const row of stale) remove.run(row.id)
+      this.db.exec('COMMIT;')
+    } catch (error) {
+      this.db.exec('ROLLBACK;')
+      throw error
+    }
+    return stale.length
+  }
+
+  /** Removes text fallbacks for visual blocks that no longer exist in the parent document. */
+  pruneVisualHints(sourceBase: string, activeSources: ReadonlySet<string>): number {
+    const rows = this.db.prepare(
+      'SELECT id, source FROM docs WHERE source LIKE ?',
+    ).all(`${sourceBase}:img:%`) as unknown as Array<{ id: number; source: string }>
     const stale = rows.filter(row => !activeSources.has(row.source))
     const remove = this.db.prepare('DELETE FROM docs WHERE id = ?')
     this.db.exec('BEGIN;')
@@ -435,11 +485,11 @@ export class KbStore {
   /**
    * 文搜图并返回可展示图片。查询向量按模型版本和问题内容持久缓存，重复提问不再次消耗额度。
    */
-  async findVisionMedia(query: string, limit = 3): Promise<KbMediaRef[]> {
+  async findVisionMedia(query: string, limit = 3, supportingText = ''): Promise<KbMediaRef[]> {
     const q = query.trim()
     if (q === '' || !visionEmbeddingsConfigured()) return []
     const rows = this.db.prepare(`
-      SELECT d.id, d.title, d.url, e.vector
+      SELECT d.id, d.title, d.content, d.url, e.vector
       FROM docs d
       JOIN embeddings e ON e.doc_id = d.id
       JOIN vision_assets a ON a.doc_id = d.id
@@ -450,18 +500,24 @@ export class KbStore {
     `).all(VISION_VECTOR_KIND, visionModelKey(), Date.now(), Date.now()) as unknown as Array<{
       id: number
       title: string
+      content: string
       url: string | null
       vector: string
     }>
     if (rows.length === 0) return []
     const queryVector = await this.cachedVisionQueryVector(q)
-    return rows.map(row => ({
-      row,
+    const itemOf = (row: typeof rows[number]): KbMediaRef => ({ id: row.id, title: row.title, sourceUrl: row.url })
+    const contextRows = rows.filter(row => visionTitleMatchesContext(row.title, row.content, q, supportingText))
+    const vectorMatches = selectVisionMatches(contextRows.map(row => ({
+      item: itemOf(row),
       score: anyCosine(queryVector, JSON.parse(row.vector) as EmbedVector),
-    })).filter(result => result.score > 0.25)
-      .sort((left, right) => right.score - left.score)
-      .slice(0, Math.max(1, Math.min(5, Math.trunc(limit))))
-      .map(({ row }) => ({ id: row.id, title: row.title, sourceUrl: row.url }))
+      corroborates: /图片说明：\S/.test(row.content),
+    })), limit)
+    return mergeMentionedVisionMatches(vectorMatches, rows.map(row => ({
+      item: itemOf(row),
+      title: row.title,
+      description: row.content,
+    })), supportingText, limit)
   }
 
   /** 保存某条助手消息实际返回的图片，供刷新会话时恢复。 */

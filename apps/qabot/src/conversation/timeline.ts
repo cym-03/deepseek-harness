@@ -25,8 +25,8 @@ function sessionEventProjection(
   images: readonly KbMediaRef[],
 ): ConversationMessageProjection | undefined {
   if (event.type === 'user/message') {
-    let text = event.data.content?.filter(block => block.type === 'text').map(block => block.text).join('') ?? ''
-    if (text.startsWith('【人工接管期间员工消息】')) text = text.slice('【人工接管期间员工消息】'.length)
+    const text = event.data.content?.filter(block => block.type === 'text').map(block => block.text).join('') ?? ''
+    if (text.startsWith('【人工接管期间员工消息】')) return undefined
     if (text === '' || text.startsWith('【人工客服回复】') || text.startsWith('【系统重试】')) return undefined
     return {
       sessionId,

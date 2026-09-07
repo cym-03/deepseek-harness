@@ -12,3 +12,10 @@ export function canAccessTicket(identity: PortalIdentity, ticket: Ticket): boole
   if (!isServiceDeskUser(identity) || ticket.department === null) return false
   return identity.departmentIds.includes(ticket.department)
 }
+
+/** Returns whether an operator may mutate an online knowledge source in a maintenance group. */
+export function canManageKnowledgeSource(identity: PortalIdentity, group: string): boolean {
+  if (hasRole(identity, ['SystemAdmin'])) return true
+  const maintenanceGroups = identity.departmentIds.map(item => item === 'default' ? '其他' : item)
+  return maintenanceGroups.includes(group)
+}

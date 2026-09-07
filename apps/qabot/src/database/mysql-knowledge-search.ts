@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import { anyCosine, embedModelKey, embedTexts, embeddingsReady, type EmbedVector } from '../kb/embed.ts'
 import { embedVisionText, visionEmbeddingsConfigured, visionModelKey } from '../kb/vision-embed.ts'
 import { toMysqlDate } from './mysql-time.ts'
-import type { KnowledgeMediaSearch, KnowledgeSearch, KnowledgeVisionStatus } from '../kb/search.ts'
+import { mergeMentionedVisionMatches, selectVisionMatches, visionTitleMatchesContext, type KnowledgeMediaSearch, type KnowledgeSearch, type KnowledgeVisionStatus } from '../kb/search.ts'
 import type { KbMediaRef } from '../kb/store.ts'
 
 interface KnowledgeHitRow extends RowDataPacket {
@@ -20,6 +20,7 @@ interface VisionHitRow extends RowDataPacket {
   id: number
   title: string
   url: string | null
+  description: string
   vector_json: unknown
 }
 
@@ -123,40 +124,58 @@ export class MysqlKnowledgeSearch implements KnowledgeSearch, KnowledgeMediaSear
     return !result.startsWith('未在知识库中找到') && result !== '（空查询）'
   }
 
-  async findVisionMedia(query: string, limit = 3): Promise<KbMediaRef[]> {
+  async findVisionMedia(query: string, limit = 3, supportingText = ''): Promise<KbMediaRef[]> {
     const normalized = query.trim()
     if (normalized === '' || !visionEmbeddingsConfigured()) return []
     const model = visionModelKey()
     const [rows] = await this.pool.execute<VisionHitRow[]>(`
-      SELECT a.id, d.title, v.source_url AS url, e.vector_json
+      SELECT a.id, d.title, v.source_url AS url, a.description, e.vector_json
       FROM knowledge_assets a
       JOIN knowledge_document_versions v ON v.id = a.version_id
       JOIN knowledge_documents d ON d.id = v.document_id
+      JOIN knowledge_sources s ON s.id = d.source_id
       JOIN knowledge_embeddings e
         ON e.target_type = 'asset' AND e.target_id = a.id
        AND e.vector_kind = 'vision' AND e.model_key = ?
       WHERE a.asset_type = 'image' AND a.binary_data IS NOT NULL
+        AND s.enabled = 1 AND s.removed_at IS NULL
         AND d.publication_status = 'online'
         AND v.status = 'published'
+        AND v.version_no = (
+          SELECT MAX(current_version.version_no)
+          FROM knowledge_document_versions current_version
+          WHERE current_version.document_id = d.id AND current_version.status = 'published'
+        )
         AND (v.effective_at IS NULL OR v.effective_at <= NOW(3))
         AND (v.expires_at IS NULL OR v.expires_at > NOW(3))
     `, [model])
     if (rows.length === 0) return []
     const queryVector = await this.cachedVisionQueryVector(normalized, model)
-    return rows.flatMap((row) => {
+    const itemOf = (row: VisionHitRow): KbMediaRef => ({ id: row.id, title: row.title, sourceUrl: row.url })
+    const vectorMatches = selectVisionMatches(rows.flatMap((row) => {
+      if (!visionTitleMatchesContext(row.title, row.description, normalized, supportingText)) return []
       const vector = parsedVector(row.vector_json)
-      return vector === undefined ? [] : [{ row, score: anyCosine(queryVector, vector) }]
-    })
-      .filter(result => result.score > 0.25)
-      .sort((left, right) => right.score - left.score)
-      .slice(0, Math.max(1, Math.min(5, Math.trunc(limit))))
-      .map(({ row }) => ({ id: row.id, title: row.title, sourceUrl: row.url }))
+      return vector === undefined ? [] : [{
+        item: itemOf(row),
+        score: anyCosine(queryVector, vector),
+        corroborates: /图片说明：\S/.test(row.description),
+      }]
+    }), limit)
+    return mergeMentionedVisionMatches(vectorMatches, rows.map(row => ({
+      item: itemOf(row),
+      title: row.title,
+      description: row.description,
+    })), supportingText, limit)
   }
 
   async visionAsset(id: number): Promise<{ mime: string; image: Buffer } | undefined> {
     const [rows] = await this.pool.execute<Array<RowDataPacket & { mime_type: string; binary_data: Buffer }>>(`
-      SELECT mime_type, binary_data FROM knowledge_assets
-      WHERE id = ? AND asset_type = 'image' AND binary_data IS NOT NULL
+      SELECT a.mime_type, a.binary_data FROM knowledge_assets a
+      JOIN knowledge_document_versions v ON v.id = a.version_id
+      JOIN knowledge_documents d ON d.id = v.document_id
+      JOIN knowledge_sources s ON s.id = d.source_id
+      WHERE a.id = ? AND a.asset_type = 'image' AND a.binary_data IS NOT NULL
+        AND s.enabled = 1 AND s.removed_at IS NULL
     `, [id])
     const row = rows[0]
     return row === undefined ? undefined : { mime: row.mime_type, image: Buffer.from(row.binary_data) }
@@ -228,7 +247,14 @@ export class MysqlKnowledgeSearch implements KnowledgeSearch, KnowledgeMediaSear
       LEFT JOIN knowledge_embeddings e
         ON e.target_type = 'chunk' AND e.target_id = c.id AND e.vector_kind = 'text'
       WHERE d.publication_status = 'online'
+        AND s.enabled = 1
+        AND s.removed_at IS NULL
         AND v.status = 'published'
+        AND v.version_no = (
+          SELECT MAX(current_version.version_no)
+          FROM knowledge_document_versions current_version
+          WHERE current_version.document_id = d.id AND current_version.status = 'published'
+        )
         AND (v.effective_at IS NULL OR v.effective_at <= NOW(3))
         AND (v.expires_at IS NULL OR v.expires_at > NOW(3))
       ORDER BY c.id

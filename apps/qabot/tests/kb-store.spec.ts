@@ -338,4 +338,36 @@ describe('KbStore embedding persistence', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2)
     store.dispose()
   })
+
+  it('reuses an unchanged board vector and replaces it when the snapshot changes', async () => {
+    process.env.VISION_EMBED_MODEL = 'qwen3-vl-embedding'
+    process.env.VISION_EMBED_BASE_URL = 'https://vision.test/api/v1'
+    process.env.VISION_EMBED_API_KEY = 'vision-key'
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      output: { embeddings: [{ embedding: [1, 0] }] },
+    }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    const store = new KbStore(tempDb())
+    const input = {
+      source: 'wiki:policy:vision:board:board-1',
+      title: '画板：晋升路径',
+      description: '【画板】晋升路径\n画板识别文字：专业序列 P1 到 P5',
+      mime: 'image/png',
+    }
+
+    store.upsertVisionAsset({ ...input, image: Buffer.from('board-v1') })
+    expect(store.visionAssetState(input.source)).toEqual({
+      contentHash: expect.any(String),
+      description: input.description,
+    })
+    expect(store.storageSnapshot().documents.find(document => document.source === input.source)?.chunks[0]?.content)
+      .toContain('专业序列 P1 到 P5')
+    expect(await store.embedVisionMissing()).toBe(1)
+    store.upsertVisionAsset({ ...input, image: Buffer.from('board-v1') })
+    expect(await store.embedVisionMissing()).toBe(0)
+    store.upsertVisionAsset({ ...input, image: Buffer.from('board-v2') })
+    expect(await store.embedVisionMissing()).toBe(1)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    store.dispose()
+  })
 })

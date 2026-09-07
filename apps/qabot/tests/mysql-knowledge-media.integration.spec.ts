@@ -24,6 +24,57 @@ afterEach(() => {
 })
 
 describeMysql('MySQL knowledge media integration', () => {
+  it('retrieves only the newest published document version', async () => {
+    if (databaseUrl === undefined) throw new Error('QABOT_TEST_MYSQL_URL is required')
+    const pool = createMysqlPool(databaseUrl, 2)
+    const suffix = randomUUID()
+    let sourceId = 0
+    let documentId = 0
+    const versionIds: number[] = []
+    try {
+      const directory = fileURLToPath(new URL('../migrations/mysql', import.meta.url))
+      await migrateMysql(pool, await loadMysqlMigrations(directory))
+      const now = toMysqlDate(Date.now())
+      const [source] = await pool.execute<ResultSetHeader>(`
+        INSERT INTO knowledge_sources
+          (source_type, source_key, name, source_url, enabled, created_at, updated_at)
+        VALUES ('manual', ?, '排班版本测试', 'https://example.test/roster', 1, ?, ?)
+      `, [`test-current-version-${suffix}`, now, now])
+      sourceId = source.insertId
+      const [document] = await pool.execute<ResultSetHeader>(`
+        INSERT INTO knowledge_documents
+          (source_id, external_document_key, title, confidentiality, publication_status,
+           publication_updated_at, created_at, updated_at)
+        VALUES (?, ?, '排班版本测试', 'internal', 'online', ?, ?, ?)
+      `, [sourceId, suffix, now, now, now])
+      documentId = document.insertId
+      for (const [index, content] of ['旧排班日期九月十九', '新排班日期九月二十二'].entries()) {
+        const contentHash = createHash('sha256').update(`${suffix}-${content}`).digest('hex')
+        const [version] = await pool.execute<ResultSetHeader>(`
+          INSERT INTO knowledge_document_versions
+            (document_id, version_no, status, content_hash, source_url, created_at, published_at)
+          VALUES (?, ?, 'published', ?, 'https://example.test/roster', ?, ?)
+        `, [documentId, index + 1, contentHash, now, now])
+        versionIds.push(version.insertId)
+        await pool.execute(`
+          INSERT INTO knowledge_chunks
+            (version_id, chunk_no, content, content_hash, section_title, created_at)
+          VALUES (?, 0, ?, ?, '排班版本测试', ?)
+        `, [version.insertId, content, contentHash, now])
+      }
+
+      const search = new MysqlKnowledgeSearch(pool)
+      expect(await search.search('旧排班日期九月十九')).toMatch(/^未在知识库中找到/)
+      expect(await search.search('新排班日期九月二十二')).toContain('新排班日期九月二十二')
+    } finally {
+      if (versionIds.length > 0) await pool.query('DELETE FROM knowledge_chunks WHERE version_id IN (?)', [versionIds])
+      if (versionIds.length > 0) await pool.query('DELETE FROM knowledge_document_versions WHERE id IN (?)', [versionIds])
+      if (documentId > 0) await pool.execute('DELETE FROM knowledge_documents WHERE id = ?', [documentId])
+      if (sourceId > 0) await pool.execute('DELETE FROM knowledge_sources WHERE id = ?', [sourceId])
+      await pool.end()
+    }
+  }, 30_000)
+
   it('recalls a related image without visual keywords and serves its binary data', async () => {
     if (databaseUrl === undefined) throw new Error('QABOT_TEST_MYSQL_URL is required')
     process.env.VISION_EMBED_MODEL = 'test-vision-model'

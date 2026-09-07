@@ -9,6 +9,7 @@ import type {
 import { toMysqlDate } from './mysql-time.ts'
 
 interface IdRow extends RowDataPacket { id: number }
+interface AssetIdRow extends IdRow { asset_key: string }
 interface NumberRow extends RowDataPacket { value: number }
 type SqlValue = string | number | Date | null | Buffer
 
@@ -24,9 +25,15 @@ export interface KnowledgeProjectionResult {
 function sourceType(source: string): string {
   if (source.startsWith('manual:')) return 'manual'
   if (source.startsWith('feishu:docx:')) return 'feishu_docx'
+  if (source.startsWith('sheet:')) return 'feishu_sheet'
   if (source.startsWith('bitable:')) return 'feishu_bitable'
   if (source.startsWith('wiki:')) return 'feishu_wiki'
   return 'knowledge'
+}
+
+/** Returns the submitted source key that owns a projected document or media derivative. */
+export function parentKnowledgeSourceKey(source: string): string {
+  return source.replace(/:(?:img:\d+|vision:.+|board-text:[^:]+|image)$/, '')
 }
 
 function versionHash(document: KnowledgeStorageDocument): string {
@@ -43,13 +50,14 @@ async function findId(connection: PoolConnection, sql: string, values: SqlValue[
 }
 
 async function sourceId(connection: PoolConnection, document: KnowledgeStorageDocument, now: number): Promise<number> {
+  const sourceKey = parentKnowledgeSourceKey(document.source)
   await connection.execute(`
     INSERT INTO knowledge_sources (
       source_type, source_key, name, source_url, owner_employee_id, enabled, created_at, updated_at
     ) VALUES (?, ?, ?, ?, NULL, 1, ?, ?)
-    ON DUPLICATE KEY UPDATE name = VALUES(name), source_url = VALUES(source_url), updated_at = VALUES(updated_at)
-  `, [sourceType(document.source), document.source, document.title, document.url, toMysqlDate(now), toMysqlDate(now)])
-  const id = await findId(connection, 'SELECT id FROM knowledge_sources WHERE source_key = ?', [document.source])
+    ON DUPLICATE KEY UPDATE updated_at = VALUES(updated_at)
+  `, [sourceType(sourceKey), sourceKey, document.title, document.url, toMysqlDate(now), toMysqlDate(now)])
+  const id = await findId(connection, 'SELECT id FROM knowledge_sources WHERE source_key = ?', [sourceKey])
   if (id === undefined) throw new Error(`知识来源投影失败：${document.source}`)
   return id
 }
@@ -159,11 +167,11 @@ async function replaceCurrentAssets(
   chunkIds: readonly number[],
   now: number,
 ): Promise<void> {
-  const [oldAssets] = await connection.execute<IdRow[]>('SELECT id FROM knowledge_assets WHERE version_id = ?', [versionId])
-  if (oldAssets.length > 0) {
-    await connection.query('DELETE FROM knowledge_embeddings WHERE target_type = ? AND target_id IN (?)', ['asset', oldAssets.map(row => row.id)])
-  }
-  await connection.execute('DELETE FROM knowledge_assets WHERE version_id = ?', [versionId])
+  const [oldAssets] = await connection.execute<AssetIdRow[]>(
+    'SELECT id, asset_key FROM knowledge_assets WHERE version_id = ?',
+    [versionId],
+  )
+  const retainedAssetKeys = new Set<string>()
   for (let index = 0; index < document.chunks.length; index += 1) {
     const chunk = document.chunks[index]
     const chunkId = chunkIds[index]
@@ -178,14 +186,19 @@ async function replaceCurrentAssets(
         JSON.stringify(embedding.vector), toMysqlDate(now), toMysqlDate(now)])
     }
     if (chunk.asset === null) continue
-    const [assetResult] = await connection.execute<ResultSetHeader>(`
+    const assetKey = String(chunk.localId)
+    retainedAssetKeys.add(assetKey)
+    await connection.execute(`
       INSERT INTO knowledge_assets (
         version_id, asset_key, asset_type, mime_type, storage_url, content_hash,
         description, binary_data, created_at
       ) VALUES (?, ?, 'image', ?, ?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE mime_type = VALUES(mime_type), storage_url = VALUES(storage_url),
+        content_hash = VALUES(content_hash), description = VALUES(description),
+        binary_data = VALUES(binary_data)
     `, [
       versionId,
-      String(chunk.localId),
+      assetKey,
       chunk.asset.mime,
       `qabot://knowledge/assets/${chunk.localId}`,
       chunk.asset.contentHash,
@@ -193,15 +206,33 @@ async function replaceCurrentAssets(
       chunk.asset.image,
       toMysqlDate(now),
     ])
+    const assetId = await findId(connection, `
+      SELECT id FROM knowledge_assets WHERE version_id = ? AND asset_key = ?
+    `, [versionId, assetKey])
+    if (assetId === undefined) throw new Error(`知识图片投影失败：${document.source}:${assetKey}`)
+    await connection.execute(
+      "DELETE FROM knowledge_embeddings WHERE target_type = 'asset' AND target_id = ?",
+      [assetId],
+    )
     for (const embedding of chunk.embeddings.filter(item => item.kind === 'vision')) {
       await connection.execute(`
         INSERT INTO knowledge_embeddings (
           target_type, target_id, vector_kind, model_key, dimensions, content_hash,
           vector_json, created_at, updated_at
         ) VALUES ('asset', ?, 'vision', ?, ?, ?, ?, ?, ?)
-      `, [assetResult.insertId, embedding.model, vectorDimensions(embedding.vector), embedding.contentHash,
+      `, [assetId, embedding.model, vectorDimensions(embedding.vector), embedding.contentHash,
         JSON.stringify(embedding.vector), toMysqlDate(now), toMysqlDate(now)])
     }
+  }
+  const staleAssetIds = oldAssets
+    .filter(asset => !retainedAssetKeys.has(asset.asset_key))
+    .map(asset => asset.id)
+  if (staleAssetIds.length > 0) {
+    await connection.query(
+      "DELETE FROM knowledge_embeddings WHERE target_type = 'asset' AND target_id IN (?)",
+      [staleAssetIds],
+    )
+    await connection.query('DELETE FROM knowledge_assets WHERE id IN (?)', [staleAssetIds])
   }
 }
 
@@ -264,14 +295,23 @@ export class MysqlKnowledgeProjection {
             reviewedBy: null,
           }]
           : storedVersions
+        let currentVersionIdValue: number | undefined
         for (const version of allVersions) {
           const versionId = await ensureVersion(connection, documentIdValue, version)
           const chunkIds = await replaceVersionChunks(connection, versionId, version.chunks, version.title, version.createdAt)
           versionCount += 1
           chunkCount += chunkIds.length
           if (document.chunks.length > 0 && version.contentHash === currentHash) {
+            currentVersionIdValue = versionId
             await replaceCurrentAssets(connection, versionId, document, chunkIds, now)
           }
+        }
+        if (currentVersionIdValue !== undefined) {
+          await connection.execute(`
+            UPDATE knowledge_document_versions
+            SET status = 'archived', archived_at = COALESCE(archived_at, ?)
+            WHERE document_id = ? AND id <> ? AND status = 'published'
+          `, [toMysqlDate(now), documentIdValue, currentVersionIdValue])
         }
       }
       await connection.execute('DELETE FROM knowledge_submissions')

@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-09-04-qabot-employee-unread-and-message-counts.md
+2026-09-04-qabot-employee-unread-and-message-counts.md: 36949c4d07d960ec27f2a720265688bc3eb5874e
+2026-09-04-qabot-employee-unread-and-message-counts.zh.md: 0419bd6238a7b50cb0cfa2922c22d97ea3b0a629

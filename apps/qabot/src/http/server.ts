@@ -9,10 +9,12 @@
  *   POST /api/tickets/:id/accept   { assignee? }                  → { ticket }
  *   POST /api/tickets/:id/reply    { message }                    → { ok }  人工回复（经飞书发给用户）
  *   POST /api/tickets/:id/close    { satisfaction? }              → { ticket }
- *   GET  /api/kb                                                 → { id, title, source }[]
- *   POST /api/kb/ingest            { title, content }             → { chunks }
- *   DELETE /api/kb/:id                                           → { ok }
  *   GET  /api/stats                                              → 服务统计
+ *   GET  /v1/knowledge/sources                                   → 在线知识源及同步状态
+ *   POST /v1/knowledge/sources      { title, url, group }          → 新增并首次同步
+ *   PATCH /v1/knowledge/sources/:id { title, group }               → 修改标题和维护分组
+ *   POST /v1/knowledge/sources/:id/sync                           → 立即同步单个来源
+ *   DELETE /v1/knowledge/sources/:id                              → 软移除来源
  *
  * 鉴权：所有环境必须配置 QABOT_API_TOKEN（缺失拒绝启动，防止内网绕过门户直接调用）。
  * 除静态测试页与 /api/health 外，所有 /api/* 请求需携带请求头 X-Qabot-Token。
@@ -25,13 +27,18 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { KbStore, type KbMediaRef } from '../kb/store.ts'
 import type { KnowledgeMediaSearch, KnowledgeSearch } from '../kb/search.ts'
-import { KbSourcesStore } from '../kb/sources.ts'
+import {
+  KNOWLEDGE_GROUPS,
+  type KnowledgeGroup,
+  type KnowledgeSourceRecord,
+  type MysqlKnowledgeSourceRepository,
+} from '../database/mysql-knowledge-sources.ts'
 import type { Ticket } from '../ticket/store.ts'
 import { EMPLOYEE_TICKET_MESSAGE_PREFIX, loadConversationTimeline } from '../conversation/timeline.ts'
 import { Qabot } from '../runner.ts'
 import { buildWeeklyReport } from '../report/weekly.ts'
 import { hasRole, verifyPortalIdentity, type PortalIdentity } from '../security/identity.ts'
-import { canAccessTicket, isServiceDeskUser } from '../security/authorization.ts'
+import { canAccessTicket, canManageKnowledgeSource, isServiceDeskUser } from '../security/authorization.ts'
 import type {
   AuditRepository,
   ConversationMessageRepository,
@@ -42,8 +49,13 @@ import type {
 
 const PUBLIC_DIR = join(fileURLToPath(new URL('.', import.meta.url)), 'public')
 
-/** 解析飞书链接 → { kind: 'wiki'|'docx', token, tableId? }。 */
-function parseFeishuUrl(url: string): { kind: 'wiki' | 'docx'; token: string; tableId?: string } | null {
+/** 解析可作为在线知识源的飞书链接。 */
+export function parseFeishuUrl(url: string): {
+  kind: 'wiki' | 'docx' | 'sheet' | 'bitable'
+  token: string
+  tableId?: string
+  sheetId?: string
+} | null {
   try {
     const u = new URL(url)
     const path = u.pathname
@@ -52,8 +64,13 @@ function parseFeishuUrl(url: string): { kind: 'wiki' | 'docx'; token: string; ta
     if (wiki !== undefined) return { kind: 'wiki', token: wiki, ...(tableId ? { tableId } : {}) }
     const docx = path.match(/\/docx\/([A-Za-z0-9]+)/)?.[1]
     if (docx !== undefined) return { kind: 'docx', token: docx }
+    const sheet = path.match(/\/sheets\/([A-Za-z0-9]+)/)?.[1]
+    if (sheet !== undefined) {
+      const sheetId = u.searchParams.get('sheet') ?? u.searchParams.get('sheetId') ?? undefined
+      return { kind: 'sheet', token: sheet, ...(sheetId ? { sheetId } : {}) }
+    }
     const base = path.match(/\/base\/([A-Za-z0-9]+)/)?.[1]
-    if (base !== undefined) return { kind: 'wiki', token: base, ...(tableId ? { tableId } : {}) }
+    if (base !== undefined && tableId !== undefined) return { kind: 'bitable', token: base, tableId }
     return null
   } catch {
     return null
@@ -87,9 +104,9 @@ export interface QabotHttpOptions {
   knowledgeSearch?: KnowledgeSearch
   knowledgeMedia?: KnowledgeMediaSearch
   staff: StaffRepository
-  /** 飞书知识源配置 + 同步入口（未提供则知识源接口不可用）。 */
-  sources?: KbSourcesStore
-  syncFeishu?: () => Promise<{ synced: number; failed: number; errors: string[] }>
+  /** MySQL source registry and synchronization entry points. */
+  knowledgeSources?: MysqlKnowledgeSourceRepository
+  syncKnowledgeSource?: (source: KnowledgeSourceRecord) => Promise<{ synced: number; failed: number; errors: string[] }>
   /** Persists the current knowledge index without invoking embedding providers. */
   projectKnowledge?: () => Promise<void>
   audit: AuditRepository
@@ -98,7 +115,8 @@ export interface QabotHttpOptions {
 }
 
 export async function startHttpServer(options: QabotHttpOptions): Promise<ReturnType<typeof createServer>> {
-  const { qabot, tickets, kb, staff, audit, outbox, messages, sources, syncFeishu, projectKnowledge } = options
+  const { qabot, tickets, kb, staff, audit, outbox, messages, knowledgeSources,
+    syncKnowledgeSource, projectKnowledge } = options
   const knowledgeSearch = options.knowledgeSearch ?? kb
   const knowledgeMedia = options.knowledgeMedia
   const token = process.env.QABOT_API_TOKEN
@@ -212,16 +230,23 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     return identity
   }
 
-  const requireKnowledgeEditor = (ctx: HttpContext): PortalIdentity => {
+  const requireKnowledgeOperator = (ctx: HttpContext): PortalIdentity => {
     const identity = ctx.identity
-    if (identity === undefined || !hasRole(identity, ['KnowledgeEditor', 'SystemAdmin'])) throw new Error('FORBIDDEN')
+    if (identity === undefined || (!isServiceDeskUser(identity)
+      && !hasRole(identity, ['KnowledgeEditor', 'KnowledgeReviewer']))) throw new Error('FORBIDDEN')
     return identity
   }
 
-  const requireKnowledgeReviewer = (ctx: HttpContext): PortalIdentity => {
-    const identity = ctx.identity
-    if (identity === undefined || !hasRole(identity, ['KnowledgeReviewer', 'SystemAdmin'])) throw new Error('FORBIDDEN')
-    return identity
+  const requireKnowledgeSourceAccess = async (ctx: HttpContext): Promise<{
+    identity: PortalIdentity
+    source: KnowledgeSourceRecord
+  }> => {
+    const identity = requireKnowledgeOperator(ctx)
+    if (knowledgeSources === undefined) throw new Error('KNOWLEDGE_SYNC_UNAVAILABLE')
+    const source = await knowledgeSources.get(Number(ctx.params.id))
+    if (source === undefined || source.removedAt !== null) throw new Error('KNOWLEDGE_SOURCE_NOT_FOUND')
+    if (!canManageKnowledgeSource(identity, source.group)) throw new Error('FORBIDDEN')
+    return { identity, source }
   }
 
   const requireTicketAccess = async (ctx: HttpContext, id: number): Promise<{ identity: PortalIdentity; ticket: Ticket }> => {
@@ -232,27 +257,27 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
   }
 
   const attachVisionMedia = async (sessionId: string, question: string): Promise<KbMediaRef[]> => {
-    const media = knowledgeMedia === undefined
-      ? await kb.findVisionMedia(question)
-      : await knowledgeMedia.findVisionMedia(question)
-    if (media.length === 0) return media
     const events = await qabot.transcript(sessionId)
     const assistant = events.findLast(event => event.type === 'assistant/message')
+    const assistantText = assistant === undefined ? '' : assistant.data.message.content
+      .filter(block => block.type === 'text')
+      .map(block => block.text)
+      .join('')
+    const media = knowledgeMedia === undefined
+      ? await kb.findVisionMedia(question, 3, assistantText)
+      : await knowledgeMedia.findVisionMedia(question, 3, assistantText)
+    if (media.length === 0) return media
     if (assistant !== undefined) {
       if (messages === undefined) {
         kb.setConversationMedia(sessionId, assistant.seq, media)
       } else {
-        const text = assistant.data.message.content
-          .filter(block => block.type === 'text')
-          .map(block => block.text)
-          .join('')
         await messages.upsert([{
           sessionId,
           sourceType: 'dsh_event',
           sourceId: String(assistant.seq),
           sourceOrder: assistant.seq,
           role: 'assistant',
-          text,
+          text: assistantText,
           createdAt: assistant.time,
           images: media,
         }])
@@ -323,7 +348,7 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     return { id: await qabot.newConversation(identity.employeeId) }
   })
 
-  route('GET', '/v1/events', async (ctx) => {
+  route('GET', '/v1/events', (ctx) => {
     const identity = ctx.identity
     if (identity === undefined) throw new Error('FORBIDDEN')
     ctx.res.writeHead(200, {
@@ -345,12 +370,18 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
       clearInterval(keepAlive)
       liveChanges.off('change', onChange)
     })
-    return undefined
+    return Promise.resolve(undefined)
   })
 
   route('GET', '/v1/conversations', async (ctx) => {
     const identity = requireEmployee(ctx)
     const conversations = await qabot.listConversations(identity.employeeId)
+    const visibleMessageCounts = messages === undefined
+      ? new Map<string, number>()
+      : new Map(await Promise.all(conversations.map(async conversation => [
+        conversation.sessionId,
+        await messages.count(conversation.sessionId),
+      ] as const)))
     const unread = messages === undefined
       ? new Map<string, number>()
       : await messages.unreadCounts(
@@ -361,6 +392,7 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     return {
       conversations: conversations.map(conversation => ({
         ...conversation,
+        messageCount: visibleMessageCounts.get(conversation.sessionId) ?? conversation.messageCount,
         unreadCount: unread.get(conversation.sessionId) ?? 0,
       })),
     }
@@ -373,7 +405,9 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
       throw new Error('CONVERSATION_NOT_FOUND')
     }
     const { latestMessageId, ...payload } = await conversationPayload(sessionId)
-    if (latestMessageId > 0) await messages?.markRead(sessionId, `employee:${identity.employeeId}`, latestMessageId)
+    if (ctx.url.searchParams.get('markRead') === '1' && latestMessageId > 0) {
+      await messages?.markRead(sessionId, `employee:${identity.employeeId}`, latestMessageId)
+    }
     return payload
   })
 
@@ -423,10 +457,7 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     if (message === '' || message.length > maxMessageLength) throw new Error('MESSAGE_INVALID')
     const sessionId = ctx.params.sessionId ?? ''
     const outcome = await answerConversation(identity.employeeId, message, sessionId)
-    const timeline = await loadConversationTimeline(sessionId, qabot, tickets, kb, messages)
-    if (timeline.latestMessageId > 0) {
-      await messages?.markRead(sessionId, `employee:${identity.employeeId}`, timeline.latestMessageId)
-    }
+    await loadConversationTimeline(sessionId, qabot, tickets, kb, messages)
     publishTicketChange(await tickets.forSession(sessionId))
     return outcome
   })
@@ -448,14 +479,11 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     event('started', { sessionId })
     try {
       const outcome = await answerConversation(identity.employeeId, message, sessionId)
-      const timeline = await loadConversationTimeline(sessionId, qabot, tickets, kb, messages)
-      if (timeline.latestMessageId > 0) {
-        await messages?.markRead(sessionId, `employee:${identity.employeeId}`, timeline.latestMessageId)
-      }
+      await loadConversationTimeline(sessionId, qabot, tickets, kb, messages)
       publishTicketChange(await tickets.forSession(sessionId))
       if (typeof outcome.text === 'string' && outcome.text !== '') event('text-delta', { text: outcome.text })
       if (Array.isArray(outcome.images)) {
-        for (const image of outcome.images) event('citation', { modality: 'image', source: image })
+        for (const image of outcome.images as unknown[]) event('citation', { modality: 'image', source: image })
       }
       if (outcome.handoffRequested === true) event('handoff', { recommended: true })
       event('completed', outcome)
@@ -486,18 +514,20 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
   route('POST', '/v1/conversations/<sessionId>/rating', async (ctx) => {
     const identity = requireEmployee(ctx)
     const sessionId = ctx.params.sessionId ?? ''
-    const body = ctx.json as { ticketId?: unknown; rating?: unknown; version?: unknown }
+    const body = ctx.json as { ticketId?: unknown; rating?: unknown; comment?: unknown; version?: unknown }
     const ticketId = typeof body.ticketId === 'number' && Number.isInteger(body.ticketId) ? body.ticketId : null
     const rating = typeof body.rating === 'number' && Number.isInteger(body.rating) ? body.rating : null
     const version = typeof body.version === 'number' && Number.isInteger(body.version) ? body.version : null
+    const comment = typeof body.comment === 'string' && body.comment.trim() !== '' ? body.comment.trim() : null
     if (ticketId === null || rating === null || rating < 1 || rating > 5 || version === null) {
       throw new Error('RATING_INVALID')
     }
+    if (comment !== null && comment.length > 1000) throw new Error('RATING_INVALID')
     const ticket = await tickets.get(ticketId)
     if (ticket === undefined || ticket.sessionId !== sessionId || ticket.userKey !== identity.employeeId) {
       throw new Error('TICKET_NOT_FOUND')
     }
-    if (!await tickets.rate(ticketId, rating, version)) throw new Error('TICKET_CONFLICT')
+    if (!await tickets.rate(ticketId, rating, comment, version)) throw new Error('TICKET_CONFLICT')
     const rated = await tickets.get(ticketId)
     publishTicketChange(rated)
     return { ticket: rated }
@@ -567,6 +597,7 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     if (version === null) throw new Error('VERSION_REQUIRED')
     if (await tickets.reply(id, message, version) === undefined) throw new Error('TICKET_CONFLICT')
     await qabot.humanReply(ticket.sessionId, message)
+    await loadConversationTimeline(ticket.sessionId, qabot, tickets, kb, messages)
     await audit.append({
       actorId: identity.employeeId,
       action: 'ticket.reply',
@@ -641,170 +672,114 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     return { ok: true, staff: await staff.list() }
   })
 
-  route('GET', '/v1/knowledge', async (ctx) => {
-    requireKnowledgeEditor(ctx)
-    return { documents: kb.list() }
-  })
-
-  route('GET', '/v1/knowledge/vision-status', async (ctx) => {
-    requireKnowledgeEditor(ctx)
-    return kb.visionStatus()
-  })
-
-  route('GET', '/v1/knowledge/reviews', async (ctx) => {
-    requireKnowledgeEditor(ctx)
-    return { pending: kb.listPending() }
-  })
-
-  route('GET', '/v1/knowledge/versions', async (ctx) => {
-    requireKnowledgeEditor(ctx)
-    return { pending: kb.pendingVersions() }
-  })
-
-  route('GET', '/v1/knowledge/versions/<id>', async (ctx) => {
-    requireKnowledgeEditor(ctx)
-    const version = kb.versionDiff(Number(ctx.params.id))
-    if (version === undefined) throw new Error('KNOWLEDGE_VERSION_NOT_FOUND')
-    return { version }
-  })
-
-  route('POST', '/v1/knowledge/versions/<id>/publish', async (ctx) => {
-    const identity = requireKnowledgeReviewer(ctx)
-    const id = Number(ctx.params.id)
-    const body = ctx.json as { effectiveAt?: unknown; expiresAt?: unknown }
-    const parsePublicationTime = (value: unknown): number | null | undefined => {
-      if (value === undefined) return undefined
-      if (value === null || value === '') return null
-      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
-        throw new Error('KNOWLEDGE_PUBLICATION_INVALID')
-      }
-      return Math.trunc(value)
+  route('GET', '/v1/knowledge/sources', async (ctx) => {
+    const identity = requireKnowledgeOperator(ctx)
+    if (knowledgeSources === undefined) throw new Error('KNOWLEDGE_SYNC_UNAVAILABLE')
+    const items = await knowledgeSources.list()
+    return {
+      sources: items.map(source => ({
+        ...source,
+        canManage: canManageKnowledgeSource(identity, source.group),
+      })),
     }
-    const effectiveAt = parsePublicationTime(body.effectiveAt)
-    const expiresAt = parsePublicationTime(body.expiresAt)
-    if (effectiveAt !== undefined && effectiveAt !== null && expiresAt !== undefined && expiresAt !== null && expiresAt <= effectiveAt) {
-      throw new Error('KNOWLEDGE_PUBLICATION_INVALID')
+  })
+
+  route('POST', '/v1/knowledge/sources', async (ctx) => {
+    const identity = requireKnowledgeOperator(ctx)
+    if (knowledgeSources === undefined || syncKnowledgeSource === undefined) {
+      throw new Error('KNOWLEDGE_SYNC_UNAVAILABLE')
     }
-    if (!kb.publishVersion(id, identity.employeeId, {
-      ...(effectiveAt !== undefined ? { effectiveAt } : {}),
-      ...(expiresAt !== undefined ? { expiresAt } : {}),
-    })) throw new Error('KNOWLEDGE_REVIEW_CONFLICT')
-    const embedded = await kb.embedMissing()
-    await projectKnowledge?.()
-    await audit.append({ actorId: identity.employeeId, action: 'knowledge.version.publish', resourceType: 'knowledge-version', resourceId: String(id), detail: JSON.stringify({ embedded, effectiveAt, expiresAt }) })
-    return { ok: true, embedded }
-  })
-
-  route('POST', '/v1/knowledge/versions/<id>/reject', async (ctx) => {
-    const identity = requireKnowledgeReviewer(ctx)
-    const id = Number(ctx.params.id)
-    if (!kb.rejectVersion(id, identity.employeeId)) throw new Error('KNOWLEDGE_REVIEW_CONFLICT')
-    await projectKnowledge?.()
-    await audit.append({ actorId: identity.employeeId, action: 'knowledge.version.reject', resourceType: 'knowledge-version', resourceId: String(id), detail: null })
-    return { ok: true }
-  })
-
-  route('POST', '/v1/knowledge/reviews', async (ctx) => {
-    const identity = requireKnowledgeEditor(ctx)
-    const body = ctx.json as { url?: unknown; title?: unknown }
-    const url = typeof body.url === 'string' ? body.url.trim() : ''
+    const body = ctx.json as { title?: unknown; url?: unknown; group?: unknown }
     const title = typeof body.title === 'string' ? body.title.trim() : ''
-    if (url === '' || !/^https?:\/\/.+\.feishu\.cn\//.test(url)) throw new Error('KNOWLEDGE_URL_INVALID')
-    const created = kb.addPending(url, title || '未命名')
-    await projectKnowledge?.()
-    await audit.append({ actorId: identity.employeeId, action: 'knowledge.review.submit', resourceType: 'knowledge-review', resourceId: String(created.id), detail: null })
-    return { ok: true, id: created.id }
-  })
-
-  route('POST', '/v1/knowledge/reviews/<id>', async (ctx) => {
-    const identity = requireKnowledgeEditor(ctx)
-    const id = Number(ctx.params.id)
-    const body = ctx.json as { url?: unknown; title?: unknown }
     const url = typeof body.url === 'string' ? body.url.trim() : ''
-    const title = typeof body.title === 'string' ? body.title.trim() : ''
-    if (url === '' || !/^https?:\/\/.+\.feishu\.cn\//.test(url)) throw new Error('KNOWLEDGE_URL_INVALID')
-    if (!kb.updatePending(id, url, title)) throw new Error('KNOWLEDGE_REVIEW_CONFLICT')
-    await projectKnowledge?.()
-    await audit.append({ actorId: identity.employeeId, action: 'knowledge.review.update', resourceType: 'knowledge-review', resourceId: String(id), detail: null })
-    return { ok: true }
-  })
-
-  route('POST', '/v1/knowledge/reviews/<id>/reject', async (ctx) => {
-    const identity = requireKnowledgeReviewer(ctx)
-    const id = Number(ctx.params.id)
-    if (!kb.setPendingStatus(id, 'rejected')) throw new Error('KNOWLEDGE_REVIEW_CONFLICT')
-    await projectKnowledge?.()
-    await audit.append({ actorId: identity.employeeId, action: 'knowledge.review.reject', resourceType: 'knowledge-review', resourceId: String(id), detail: null })
-    return { ok: true }
-  })
-
-  route('POST', '/v1/knowledge/reviews/<id>/approve', async (ctx) => {
-    const identity = requireKnowledgeReviewer(ctx)
-    if (sources === undefined || syncFeishu === undefined) throw new Error('KNOWLEDGE_SYNC_UNAVAILABLE')
-    const id = Number(ctx.params.id)
-    const item = kb.listPending().find(candidate => candidate.id === id)
-    if (item === undefined || item.status !== 'pending') throw new Error('KNOWLEDGE_REVIEW_CONFLICT')
-    const parsed = parseFeishuUrl(item.url)
-    if (parsed === null) throw new Error('KNOWLEDGE_URL_INVALID')
-    const config = sources.load()
-    if (parsed.kind === 'wiki') {
-      config.wiki = config.wiki.filter(source => source.nodeToken !== parsed.token)
-      config.wiki.push({
-        nodeToken: parsed.token,
-        title: item.title,
-        url: item.url,
-        ...(parsed.tableId ? { tableId: parsed.tableId } : {}),
-      })
-    } else {
-      config.docx = config.docx.filter(source => source.id !== parsed.token)
-      config.docx.push({ id: parsed.token, title: item.title, url: item.url })
-    }
-    sources.save(config)
-    if (!kb.setPendingStatus(id, 'approved')) throw new Error('KNOWLEDGE_REVIEW_CONFLICT')
-    const result = await syncFeishu()
-    const sourceKey = parsed.kind === 'wiki' ? `wiki:${parsed.token}` : `feishu:docx:${parsed.token}`
-    const version = kb.pendingVersions().find(candidate => candidate.source === sourceKey)
-    if (version !== undefined) {
-      kb.publishVersion(version.id, identity.employeeId)
-      await kb.embedMissing()
-    }
-    await projectKnowledge?.()
-    await audit.append({ actorId: identity.employeeId, action: 'knowledge.review.approve', resourceType: 'knowledge-review', resourceId: String(id), detail: JSON.stringify({ synced: result.synced, errors: result.errors.length }) })
-    return { ok: true, synced: result.synced, errors: result.errors }
-  })
-
-  route('POST', '/v1/knowledge/sync', async (ctx) => {
-    const identity = requireKnowledgeEditor(ctx)
-    if (syncFeishu === undefined) throw new Error('KNOWLEDGE_SYNC_UNAVAILABLE')
-    const result = await syncFeishu()
-    await audit.append({ actorId: identity.employeeId, action: 'knowledge.sync', resourceType: 'knowledge', resourceId: 'feishu', detail: JSON.stringify({ synced: result.synced, errors: result.errors.length }) })
-    return { result }
-  })
-
-  route('DELETE', '/v1/knowledge/<source>', async (ctx) => {
-    const identity = requireSystemAdmin(ctx)
-    kb.remove(ctx.params.source ?? '')
-    await projectKnowledge?.()
-    await audit.append({ actorId: identity.employeeId, action: 'knowledge.archive', resourceType: 'knowledge', resourceId: ctx.params.source ?? '', detail: null })
-    return { ok: true }
-  })
-
-  route('POST', '/v1/knowledge/<source>/publication', async (ctx) => {
-    const identity = requireKnowledgeReviewer(ctx)
-    const body = ctx.json as { online?: unknown }
-    if (typeof body.online !== 'boolean') throw new Error('KNOWLEDGE_PUBLICATION_INVALID')
-    const source = ctx.params.source ?? ''
-    if (!kb.setPublication(source, body.online)) throw new Error('KNOWLEDGE_VERSION_NOT_FOUND')
-    const embedded = body.online ? await kb.embedMissing() : 0
-    await projectKnowledge?.()
+    const group = typeof body.group === 'string' && KNOWLEDGE_GROUPS.includes(body.group as KnowledgeGroup)
+      ? body.group as KnowledgeGroup
+      : null
+    const parsed = parseFeishuUrl(url)
+    if (title === '' || parsed === null || group === null) throw new Error('KNOWLEDGE_SOURCE_INVALID')
+    if (!canManageKnowledgeSource(identity, group)) throw new Error('FORBIDDEN')
+    const sourceKey = parsed.kind === 'wiki'
+      ? `wiki:${parsed.token}`
+      : parsed.kind === 'sheet'
+        ? `sheet:${parsed.token}:${parsed.sheetId ?? ''}`
+        : parsed.kind === 'bitable'
+          ? `bitable:${parsed.token}:${parsed.tableId ?? ''}`
+          : `feishu:docx:${parsed.token}`
+    const created = await knowledgeSources.createOrReactivate({
+      sourceType: parsed.kind === 'wiki'
+        ? 'feishu_wiki'
+        : parsed.kind === 'sheet'
+          ? 'feishu_sheet'
+          : parsed.kind === 'bitable' ? 'feishu_bitable' : 'feishu_docx',
+      sourceKey,
+      title,
+      url,
+      group,
+      submitterEmployeeId: identity.employeeId,
+      submitterName: identity.displayName,
+      allowMigrationClaim: hasRole(identity, ['SystemAdmin']),
+    })
     await audit.append({
       actorId: identity.employeeId,
-      action: body.online ? 'knowledge.publish.online' : 'knowledge.publish.offline',
-      resourceType: 'knowledge',
-      resourceId: source,
-      detail: JSON.stringify({ embedded }),
+      action: created.claimed
+        ? 'knowledge.source.claim'
+        : created.reactivated ? 'knowledge.source.restore' : 'knowledge.source.add',
+      resourceType: 'knowledge-source',
+      resourceId: String(created.source.id),
+      detail: JSON.stringify({ title, group, url }),
     })
-    return { ok: true, online: body.online, embedded }
+    const result = await syncKnowledgeSource(created.source)
+    return { source: await knowledgeSources.get(created.source.id), result }
+  })
+
+  route('PATCH', '/v1/knowledge/sources/<id>', async (ctx) => {
+    const { identity, source } = await requireKnowledgeSourceAccess(ctx)
+    if (knowledgeSources === undefined) throw new Error('KNOWLEDGE_SYNC_UNAVAILABLE')
+    const body = ctx.json as { title?: unknown; group?: unknown }
+    const title = typeof body.title === 'string' ? body.title.trim() : ''
+    const group = typeof body.group === 'string' && KNOWLEDGE_GROUPS.includes(body.group as KnowledgeGroup)
+      ? body.group as KnowledgeGroup
+      : null
+    if (title === '' || group === null) throw new Error('KNOWLEDGE_SOURCE_INVALID')
+    if (!canManageKnowledgeSource(identity, group)) throw new Error('FORBIDDEN')
+    if (!await knowledgeSources.update(source.id, title, group)) throw new Error('KNOWLEDGE_SOURCE_NOT_FOUND')
+    await audit.append({ actorId: identity.employeeId, action: 'knowledge.source.edit',
+      resourceType: 'knowledge-source', resourceId: String(source.id), detail: JSON.stringify({ title, group }) })
+    return { source: await knowledgeSources.get(source.id) }
+  })
+
+  route('POST', '/v1/knowledge/sources/<id>/sync', async (ctx) => {
+    const access = await requireKnowledgeSourceAccess(ctx)
+    const { identity } = access
+    let { source } = access
+    if (syncKnowledgeSource === undefined || knowledgeSources === undefined) throw new Error('KNOWLEDGE_SYNC_UNAVAILABLE')
+    if (source.submitterEmployeeId === 'system-migration' && hasRole(identity, ['SystemAdmin'])) {
+      if (await knowledgeSources.claimMigrated(source.id, identity.employeeId, identity.displayName)) {
+        await audit.append({ actorId: identity.employeeId, action: 'knowledge.source.claim',
+          resourceType: 'knowledge-source', resourceId: String(source.id), detail: JSON.stringify({ group: source.group }) })
+        source = await knowledgeSources.get(source.id) ?? source
+      }
+    }
+    const result = await syncKnowledgeSource(source)
+    await audit.append({ actorId: identity.employeeId, action: result.failed > 0 ? 'knowledge.source.sync_failed' : 'knowledge.source.sync',
+      resourceType: 'knowledge-source', resourceId: String(source.id), detail: JSON.stringify(result) })
+    return { source: await knowledgeSources.get(source.id), result }
+  })
+
+  route('DELETE', '/v1/knowledge/sources/<id>', async (ctx) => {
+    const { identity, source } = await requireKnowledgeSourceAccess(ctx)
+    if (knowledgeSources === undefined) throw new Error('KNOWLEDGE_SYNC_UNAVAILABLE')
+    if (!await knowledgeSources.remove(source.id)) throw new Error('KNOWLEDGE_SOURCE_NOT_FOUND')
+    kb.setPublication(source.sourceKey, false)
+    await projectKnowledge?.()
+    await audit.append({ actorId: identity.employeeId, action: 'knowledge.source.remove',
+      resourceType: 'knowledge-source', resourceId: String(source.id), detail: JSON.stringify({ group: source.group }) })
+    return { ok: true }
+  })
+
+  route('GET', '/v1/knowledge/vision-status', (ctx) => {
+    requireKnowledgeOperator(ctx)
+    return Promise.resolve(kb.visionStatus())
   })
 
   route('GET', '/v1/analytics/weekly', async (ctx) => {
@@ -814,7 +789,13 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     const since = sinceRaw === null ? undefined : Number(sinceRaw)
     const requestedAssignee = ctx.url.searchParams.get('assignee') ?? undefined
     const assignee = hasRole(identity, ['SystemAdmin']) ? requestedAssignee : identity.displayName
-    return buildWeeklyReport(tickets, Number.isFinite(since) ? since : undefined, Number.isFinite(weeks) && weeks > 0 ? weeks : 1, assignee)
+    return buildWeeklyReport(
+      tickets,
+      Number.isFinite(since) ? since : undefined,
+      Number.isFinite(weeks) && weeks > 0 ? weeks : 1,
+      assignee,
+      messages,
+    )
   })
 
   route('GET', '/v1/system/audit', async (ctx) => {
@@ -887,12 +868,13 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
 
   route('POST', '/api/conversations/<sessionId>/rating', async (ctx) => {
     const sessionId = ctx.params.sessionId ?? ''
-    const body = ctx.json as { userId?: unknown; ticketId?: unknown; rating?: unknown; version?: unknown }
+    const body = ctx.json as { userId?: unknown; ticketId?: unknown; rating?: unknown; comment?: unknown; version?: unknown }
     const userId = typeof body.userId === 'string' ? body.userId : ''
     const ticketId = typeof body.ticketId === 'number' && Number.isInteger(body.ticketId) ? body.ticketId : null
     const rating = typeof body.rating === 'number' && Number.isInteger(body.rating) ? body.rating : null
     const version = typeof body.version === 'number' && Number.isInteger(body.version) ? body.version : null
-    if (userId === '' || ticketId === null || rating === null || rating < 1 || rating > 5 || version === null) {
+    const comment = typeof body.comment === 'string' && body.comment.trim() !== '' ? body.comment.trim() : null
+    if (userId === '' || ticketId === null || rating === null || rating < 1 || rating > 5 || version === null || (comment !== null && comment.length > 1000)) {
       send(ctx.res, 400, { error: '评分参数无效' })
       return undefined
     }
@@ -901,7 +883,7 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
       send(ctx.res, 404, { error: '工单不存在或不属于当前员工' })
       return undefined
     }
-    if (!await tickets.rate(ticketId, rating, version)) {
+    if (!await tickets.rate(ticketId, rating, comment, version)) {
       send(ctx.res, 409, { error: '工单状态已更新，请刷新后重新评分' })
       return undefined
     }
@@ -1035,6 +1017,7 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
       return undefined
     }
     await qabot.humanReply(ticket.sessionId, message)
+    await loadConversationTimeline(ticket.sessionId, qabot, tickets, kb, messages)
     return { ok: true, ticket: await tickets.get(id) }
   })
 
@@ -1089,7 +1072,7 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     return { ticket: await tickets.get(id) }
   })
 
-  route('GET', '/api/kb', async () => kb.list())
+  route('GET', '/api/kb', () => Promise.resolve(kb.list()))
 
   route('POST', '/api/kb/ingest', async (ctx) => {
     const body = ctx.json as { title?: unknown; content?: unknown }
@@ -1119,193 +1102,13 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     const sinceRaw = ctx.url.searchParams.get('since')
     const since = sinceRaw !== null ? Number(sinceRaw) : undefined
     const assignee = ctx.url.searchParams.get('assignee') ?? undefined
-    return buildWeeklyReport(tickets, Number.isFinite(since) ? since : undefined, Number.isFinite(weeks) && weeks > 0 ? weeks : 1, assignee)
-  })
-
-  // ── 飞书知识源 ──
-  route('POST', '/api/kb/sync-feishu', async (ctx) => {
-    if (syncFeishu === undefined) {
-      send(ctx.res, 501, { error: '未配置飞书知识源同步' })
-      return undefined
-    }
-    return { result: await syncFeishu() }
-  })
-
-  route('GET', '/api/kb/sources', async (ctx) => {
-    if (sources === undefined) {
-      send(ctx.res, 501, { error: '未配置知识源' })
-      return undefined
-    }
-    return sources.load()
-  })
-
-  route('POST', '/api/kb/sources', async (ctx) => {
-    if (sources === undefined) {
-      send(ctx.res, 501, { error: '未配置知识源' })
-      return undefined
-    }
-    const body = ctx.json as {
-      kind?: unknown
-      id?: unknown
-      appToken?: unknown
-      tableId?: unknown
-      title?: unknown
-      fields?: unknown
-      nodeToken?: unknown
-    }
-    const config = sources.load()
-    const kind = body.kind === 'docx' || body.kind === 'bitable' || body.kind === 'wiki' ? body.kind : null
-    if (kind === null) {
-      send(ctx.res, 400, { error: 'kind 必须是 docx / bitable / wiki' })
-      return undefined
-    }
-    if (kind === 'wiki') {
-      const nodeToken = typeof body.nodeToken === 'string' && body.nodeToken.trim() !== '' ? body.nodeToken.trim() : null
-      if (nodeToken === null) {
-        send(ctx.res, 400, { error: 'nodeToken（/wiki/ 后的知识库节点 token）必填' })
-        return undefined
-      }
-      config.wiki = config.wiki.filter(s => s.nodeToken !== nodeToken)
-      config.wiki.push({
-        nodeToken,
-        ...typeof body.tableId === 'string' && body.tableId.trim() !== '' ? { tableId: body.tableId.trim() } : {},
-        ...typeof body.title === 'string' ? { title: body.title } : {},
-        ...typeof body.fields === 'object' && body.fields !== null
-          ? { fields: body.fields as { question?: string; answer?: string } }
-          : {},
-      })
-    } else if (kind === 'docx') {
-      const id = typeof body.id === 'string' && body.id.trim() !== '' ? body.id.trim() : null
-      if (id === null) {
-        send(ctx.res, 400, { error: 'id（文档 token）必填' })
-        return undefined
-      }
-      config.docx = config.docx.filter(s => s.id !== id)
-      config.docx.push({
-        id,
-        ...typeof body.title === 'string' ? { title: body.title } : {},
-      })
-    } else {
-      const appToken = typeof body.appToken === 'string' && body.appToken.trim() !== '' ? body.appToken.trim() : null
-      const tableId = typeof body.tableId === 'string' && body.tableId.trim() !== '' ? body.tableId.trim() : null
-      if (appToken === null || tableId === null) {
-        send(ctx.res, 400, { error: 'appToken 和 tableId 必填（多维表格 URL 中 ?table= 后的部分）' })
-        return undefined
-      }
-      config.bitable = config.bitable.filter(s => s.appToken !== appToken)
-      config.bitable.push({
-        appToken,
-        tableId,
-        ...typeof body.title === 'string' ? { title: body.title } : {},
-        ...typeof body.fields === 'object' && body.fields !== null
-          ? { fields: body.fields as { question?: string; answer?: string } }
-          : {},
-      })
-    }
-    sources.save(config)
-    return { ok: true, sources: config }
-  })
-
-  route('DELETE', '/api/kb/sources/<kind>/<id>', async (ctx) => {
-    if (sources === undefined) {
-      send(ctx.res, 501, { error: '未配置知识源' })
-      return undefined
-    }
-    const config = sources.load()
-    if (ctx.params.kind === 'docx') {
-      config.docx = config.docx.filter(s => s.id !== ctx.params.id)
-    } else if (ctx.params.kind === 'bitable') {
-      config.bitable = config.bitable.filter(s => s.appToken !== ctx.params.id)
-    } else if (ctx.params.kind === 'wiki') {
-      config.wiki = config.wiki.filter(s => s.nodeToken !== ctx.params.id)
-    } else {
-      send(ctx.res, 400, { error: 'kind 必须是 docx / bitable / wiki' })
-      return undefined
-    }
-    sources.save(config)
-    return { ok: true, sources: config }
-  })
-
-  // ── 知识库录入审核（表单提交飞书链接，主管审核后入库）──
-  route('POST', '/api/kb/pending', async (ctx) => {
-    const body = ctx.json as { url?: unknown; title?: unknown }
-    const url = typeof body.url === 'string' ? body.url.trim() : ''
-    const title = typeof body.title === 'string' ? body.title.trim() : ''
-    if (url === '' || !/^https?:\/\/.+\.feishu\.cn\//.test(url)) {
-      send(ctx.res, 400, { error: '请输入有效的飞书文档/表格链接' })
-      return undefined
-    }
-    const { id } = kb.addPending(url, title || '未命名')
-    await projectKnowledge?.()
-    return { ok: true, id }
-  })
-
-  route('GET', '/api/kb/pending', async () => ({ pending: kb.listPending() }))
-
-  route('POST', '/api/kb/pending/<id>/approve', async (ctx) => {
-    if (sources === undefined || syncFeishu === undefined) {
-      send(ctx.res, 501, { error: '未配置知识源' })
-      return undefined
-    }
-    const id = Number(ctx.params.id)
-    const item = kb.listPending().find(p => p.id === id)
-    if (item === undefined) {
-      send(ctx.res, 404, { error: '待审核条目不存在' })
-      return undefined
-    }
-    const parsed = parseFeishuUrl(item.url)
-    if (parsed === null) {
-      send(ctx.res, 400, { error: '无法解析该飞书链接（需 wiki 或 docx 链接）' })
-      return undefined
-    }
-    const config = sources.load()
-    if (parsed.kind === 'wiki') {
-      config.wiki = config.wiki.filter(s => s.nodeToken !== parsed.token)
-      config.wiki.push({
-        nodeToken: parsed.token,
-        title: item.title,
-        url: item.url,
-        ...(parsed.tableId ? { tableId: parsed.tableId } : {}),
-      })
-    } else {
-      config.docx = config.docx.filter(s => s.id !== parsed.token)
-      config.docx.push({ id: parsed.token, title: item.title, url: item.url })
-    }
-    sources.save(config)
-    if (!kb.setPendingStatus(id, 'approved')) {
-      send(ctx.res, 400, { error: '该条目已处理' })
-      return undefined
-    }
-    const result = await syncFeishu()
-    await projectKnowledge?.()
-    return { ok: true, synced: result.synced, errors: result.errors }
-  })
-
-  route('POST', '/api/kb/pending/<id>/reject', async (ctx) => {
-    const id = Number(ctx.params.id)
-    if (!kb.setPendingStatus(id, 'rejected')) {
-      send(ctx.res, 400, { error: '该条目已处理' })
-      return undefined
-    }
-    await projectKnowledge?.()
-    return { ok: true }
-  })
-
-  // 修改待审核条目（弹窗表单编辑）。
-  route('POST', '/api/kb/pending/<id>', async (ctx) => {
-    const id = Number(ctx.params.id)
-    const body = ctx.json as { url?: unknown; title?: unknown }
-    const url = typeof body.url === 'string' ? body.url.trim() : ''
-    if (url === '' || !/^https?:\/\/.+\.feishu\.cn\//.test(url)) {
-      send(ctx.res, 400, { error: '请输入有效的飞书文档/表格链接' })
-      return undefined
-    }
-    if (!kb.updatePending(id, url, typeof body.title === 'string' ? body.title.trim() : '')) {
-      send(ctx.res, 400, { error: '该条目已处理或不存在' })
-      return undefined
-    }
-    await projectKnowledge?.()
-    return { ok: true }
+    return buildWeeklyReport(
+      tickets,
+      Number.isFinite(since) ? since : undefined,
+      Number.isFinite(weeks) && weeks > 0 ? weeks : 1,
+      assignee,
+      messages,
+    )
   })
 
   // 服务人员名单（qa-admin 后台配置用，按身份组）
@@ -1343,7 +1146,7 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     return { ok: true, staff: await staff.list() }
   })
 
-  const server = createServer(async (req, res) => {
+  const handleRequest = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     try {
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
       // 静态测试页 + 健康检查不暴露任何数据，豁免鉴权；其余所有 /api/* 一律校验 X-Qabot-Token。
@@ -1432,24 +1235,28 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
           send(res, 400, { code: msg, message: '评分必须为 1-5' })
           return
         }
-        if (msg === 'TRANSFER_TARGET_INVALID' || msg === 'STAFF_INVALID' || msg === 'KNOWLEDGE_URL_INVALID' || msg === 'KNOWLEDGE_PUBLICATION_INVALID') {
-          send(res, 400, { code: msg, message: msg === 'TRANSFER_TARGET_INVALID' ? '请选择目标服务组中已启用的服务人员' : msg === 'STAFF_INVALID' ? '服务人员标识不能为空' : msg === 'KNOWLEDGE_PUBLICATION_INVALID' ? '知识上下架状态或生效时间无效' : '请输入有效的飞书文档链接' })
+        if (msg === 'TRANSFER_TARGET_INVALID' || msg === 'STAFF_INVALID' || msg === 'KNOWLEDGE_URL_INVALID') {
+          send(res, 400, { code: msg, message: msg === 'TRANSFER_TARGET_INVALID' ? '请选择目标服务组中已启用的服务人员' : msg === 'STAFF_INVALID' ? '服务人员标识不能为空' : '请输入有效的飞书文档链接' })
           return
         }
         if (msg === 'STAFF_NOT_FOUND') {
           send(res, 404, { code: msg, message: '服务人员不存在' })
           return
         }
-        if (msg === 'KNOWLEDGE_REVIEW_CONFLICT') {
-          send(res, 409, { code: msg, message: '知识审核记录已处理或不存在' })
-          return
-        }
-        if (msg === 'KNOWLEDGE_VERSION_NOT_FOUND') {
-          send(res, 404, { code: msg, message: '知识版本不存在' })
-          return
-        }
         if (msg === 'KNOWLEDGE_SYNC_UNAVAILABLE') {
           send(res, 503, { code: msg, message: '知识同步服务未配置' })
+          return
+        }
+        if (msg === 'KNOWLEDGE_SOURCE_EXISTS') {
+          send(res, 409, { code: msg, message: '知识源已存在' })
+          return
+        }
+        if (msg === 'KNOWLEDGE_SOURCE_NOT_FOUND') {
+          send(res, 404, { code: msg, message: '知识源不存在或已移除' })
+          return
+        }
+        if (msg === 'KNOWLEDGE_SOURCE_INVALID') {
+          send(res, 400, { code: msg, message: '请填写标题、有效的飞书文档链接和知识分组' })
           return
         }
         // 中转网关余额不足 / 流被掐断 → 给出明确提示而非生硬错误。
@@ -1462,6 +1269,9 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
         }
       }
     }
+  }
+  const server = createServer((req, res) => {
+    void handleRequest(req, res)
   })
 
   const closeIdleConversations = async (): Promise<void> => {
@@ -1473,12 +1283,14 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
   }
   await closeIdleConversations()
   const idleTimer = setInterval(() => {
-    void closeIdleConversations().catch((error) => {
+    void closeIdleConversations().catch((error: unknown) => {
       console.error('[ticket] 自动结束空闲智能会话失败:', error instanceof Error ? error.message : error)
     })
   }, idleSweepMs)
   idleTimer.unref()
-  server.on('close', () => clearInterval(idleTimer))
+  server.on('close', () => {
+    clearInterval(idleTimer)
+  })
 
   await new Promise<void>(resolve => server.listen(options.port, options.host ?? '0.0.0.0', resolve))
   console.log(`[http] qabot 服务已启动：http://${options.host ?? '0.0.0.0'}:${options.port}`)

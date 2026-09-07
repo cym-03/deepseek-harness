@@ -484,6 +484,7 @@ interface TicketRow extends RowDataPacket {
   service_start: MysqlDateValue | null
   service_end: MysqlDateValue | null
   satisfaction: number | null
+  satisfaction_comment: string | null
   handoff_reason: string | null
   created_at: MysqlDateValue
   updated_at: MysqlDateValue
@@ -495,6 +496,7 @@ function toTicket(row: TicketRow): Ticket {
     id: row.id, sessionId: row.session_id, userKey: row.user_key, kind: row.kind, status: row.status,
     department: row.department, assignee: row.assignee, question: row.question,
     serviceStart: fromMysqlDate(row.service_start), serviceEnd: fromMysqlDate(row.service_end), satisfaction: row.satisfaction,
+    satisfactionComment: row.satisfaction_comment,
     handoffReason: row.handoff_reason,
     createdAt: fromMysqlDate(row.created_at), updatedAt: fromMysqlDate(row.updated_at), version: row.version,
   }
@@ -674,11 +676,11 @@ export class MysqlTicketRepository implements TicketRepository {
     )
   }
 
-  async rate(ticketId: number, satisfaction: number, expectedVersion?: number): Promise<boolean> {
+  async rate(ticketId: number, satisfaction: number, comment: string | null, expectedVersion?: number): Promise<boolean> {
     const suffix = expectedVersion === undefined ? '' : " AND status IN ('resolved', 'closed') AND satisfaction IS NULL"
     return await this.updateWithOptionalVersion(
-      `UPDATE tickets SET satisfaction = ?, updated_at = ?, version = version + 1 WHERE id = ?${suffix}`,
-      [satisfaction, toMysqlDate(Date.now()), ticketId], expectedVersion,
+      `UPDATE tickets SET satisfaction = ?, satisfaction_comment = ?, updated_at = ?, version = version + 1 WHERE id = ?${suffix}`,
+      [satisfaction, comment, toMysqlDate(Date.now()), ticketId], expectedVersion,
     )
   }
 

@@ -4,7 +4,7 @@ English | [中文](README.zh.md)
 
 An internal employee Q&A service embedded in DeepSeek Harness and called through the employee service desk portal's NestJS proxy.
 
-The current baseline includes persistent text and visual indexes, signed portal identity, employee conversation authorization, per-conversation serialized execution, and versioned conversation APIs. Ticket, knowledge-management, and operations endpoints remain available through the compatibility `/api` routes until their domain migrations are complete.
+The current baseline includes persistent text and visual indexes, signed portal identity, employee conversation authorization, per-conversation serialized execution, versioned conversation APIs, and MySQL-authoritative online knowledge-source management. Ticket and operations endpoints remain available through the compatibility `/api` routes until their domain migrations are complete.
 
 ## Architecture
 
@@ -48,8 +48,11 @@ The portal base64url-encodes the UTF-8 JSON identity claims and signs that encod
 | `GET /v1/agent/tickets/:id` | Read an authorized ticket and its public replies |
 | `POST /v1/agent/tickets/:id/accept` | Accept using the signed `employeeId` and `{ version }` |
 | `POST /v1/agent/tickets/:id/reply` | Append `{ message, version }` and enter `waiting_employee` |
-| `POST /v1/knowledge/versions/:id/publish` | Publish a reviewed version with optional `{ effectiveAt, expiresAt }` |
-| `POST /v1/knowledge/:source/publication` | Set `{ online }` without deleting versions or vectors |
+| `GET /v1/knowledge/sources` | List active online sources and their synchronization health |
+| `POST /v1/knowledge/sources` | Add `{ title, url, group }` and start the first synchronization |
+| `PATCH /v1/knowledge/sources/:id` | Edit the source title or maintenance group |
+| `POST /v1/knowledge/sources/:id/sync` | Synchronize one source immediately |
+| `DELETE /v1/knowledge/sources/:id` | Soft-remove a source from synchronization and retrieval |
 | `GET /v1/system/audit` | Let SystemAdmin query privileged-operation audit records |
 
 ## HTTP API
@@ -62,9 +65,6 @@ The portal base64url-encodes the UTF-8 JSON identity claims and signs that encod
 | `POST /api/tickets/:id/accept` | Accept with `{ assignee }` and enter `in_service` |
 | `POST /api/tickets/:id/reply` | Add a public employee-visible reply `{ message }` |
 | `POST /api/tickets/:id/close` | Close with `{ satisfaction? }` |
-| `GET /api/kb` | List knowledge entries |
-| `POST /api/kb/ingest` | Ingest `{ title, content }` manually |
-| `DELETE /api/kb/:source` | Remove a knowledge source |
 | `GET /api/stats` | Read service statistics |
 
 ## Authentication
@@ -110,8 +110,9 @@ DEEPSEEK_BASE_URL=http://<relay>/v1 node --import tsx/esm apps/qabot/src/bin.ts 
 | `DEEPSEEK_BASE_URL` | required | OpenAI-compatible relay URL; export it at launch |
 | `QABOT_PORT` | 3100 | Service port |
 | `QABOT_HOST` | 0.0.0.0 | Listener address |
-| `QABOT_SYNC_INTERVAL_MINUTES` | 30 | Scheduled knowledge synchronization; 0 disables it |
+| `QABOT_SYNC_INTERVAL_MINUTES` | 5 | Scheduled knowledge synchronization; 0 disables it |
 | `QABOT_API_TOKEN` | required | Shared `X-Qabot-Token`; startup fails when missing |
+| `QABOT_PORTAL_INTERNAL_URL` | `http://127.0.0.1:3000/api/internal/qabot` | Portal credential broker used for submitter-scoped Feishu synchronization |
 | `QABOT_IDENTITY_SECRET` | required | Verifies short-lived portal identities; never commit it |
 | `QABOT_MAX_BODY_BYTES` | 1048576 | Maximum HTTP request body size |
 | `QABOT_MAX_MESSAGE_LENGTH` | 8000 | Maximum employee message length |
@@ -153,7 +154,9 @@ The deployed business database is MySQL `hr_system`. MySQL migrations use consec
 pnpm --filter @deepseek-ai/dsh-qabot run db:migrate:mysql
 ```
 
-The MySQL provider stores conversations, messages, tickets, audit records, Outbox rows, service-team configuration, knowledge submissions, knowledge versions, source-image binaries and vectors, query-vector cache entries, and raw DSH model events in `hr_system`. Knowledge ingestion creates missing text and image vectors before projecting an approved version. Model retrieval reads published effective MySQL versions directly and automatically combines text and related-image recall for every non-empty employee question; it does not require image-related keywords. `kb.db` is a rebuildable ingestion index for synchronization, review, and embedding calculation. Projection copies stored vectors without requesting embeddings. A visual query vector is generated only when eligible image candidates exist and is reused by normalized query hash and model key. Business dates use Asia/Shanghai `DATETIME(3)` columns so operators see `YYYY-MM-DD HH:mm:ss.SSS` values directly; repositories convert them to Unix milliseconds at the application boundary. Configure `QABOT_DATABASE_BACKEND=mysql` and `QABOT_MYSQL_URL`; startup applies pending migrations. Real integration tests read only `QABOT_TEST_MYSQL_URL` and must not remain pointed at production.
+The MySQL provider stores conversations, messages, tickets, audit records, Outbox rows, service-team configuration, online knowledge-source configuration, internal knowledge versions, source-image binaries and vectors, query-vector cache entries, and raw DSH model events in `hr_system`. A source's first successful synchronization becomes available to employee retrieval immediately. Later successful synchronizations atomically replace its current content, while a failed update retains the last usable content. `kb.db` is a rebuildable working index used to parse synchronized content and calculate missing embeddings; it is not the production source registry or retrieval authority. Projection copies stored vectors without requesting embeddings. Model retrieval reads active MySQL sources and automatically combines text and related-image recall for every non-empty employee question. A visual query vector is generated only when eligible image candidates exist and is reused by normalized query hash and model key. Business dates use Asia/Shanghai `DATETIME(3)` columns so operators see `YYYY-MM-DD HH:mm:ss.SSS` values directly; repositories convert them to Unix milliseconds at the application boundary. Configure `QABOT_DATABASE_BACKEND=mysql` and `QABOT_MYSQL_URL`; startup applies pending migrations. Real integration tests read only `QABOT_TEST_MYSQL_URL` and must not remain pointed at production.
+
+Image attachments combine the question's cached visual-vector matches with active captioned images or boards named explicitly by the generated answer. Answer-supported selection does not request another embedding, and generic document-image labels never attach every unlabeled image from a cited source.
 
 Employee, assistant, and public service-desk messages are projected into MySQL `conversation_messages` with stable source identifiers. `dsh_model_sessions` and `dsh_model_session_events` retain the complete model-visible history needed for resume, while portal timeline reads use the durable business projection. Migration 11 imports legacy JSONL sessions and service-team rows once, records completion in `qabot_data_imports`, and retains the source files as rollback evidence. Run `pnpm --filter @deepseek-ai/dsh-qabot run db:project-messages` only when an older deployment still needs its conversation projection backfilled; the command is idempotent and does not invoke language or embedding models.
 
@@ -168,6 +171,8 @@ Employees submit satisfaction scores in the portal conversation rather than Feis
 | `VISION_EMBED_BASE_URL` | `https://dashscope.aliyuncs.com/api/v1` | DashScope multimodal API base URL |
 | `VISION_EMBED_DIMENSION` | 1024 | Visual vector dimension; changing it invalidates visual vectors |
 | `VISION_EMBED_MAX_PER_SYNC` | 20 | Maximum missing or invalid visual vectors generated by one synchronization run |
+| `VISION_OCR_MODEL` | `qwen-vl-ocr` | OpenAI-compatible model that extracts searchable text from changed board snapshots |
+| `VISION_OCR_MAX_TOKENS` | 4096 | Maximum output for each board OCR request; dense snapshots are divided into overlapping regions when this limit is reached |
 
 ### Logging
 - Console and timestamped `apps/qabot/data/qabot.log` output.
@@ -192,8 +197,8 @@ Allow inbound TCP port 3100 in Windows Firewall when the host policy requires it
 - **Relay balance:** the configured relay can return `Insufficient Balance`, which closes model streams until provider balance is available.
 - **Empty-response retry:** a relay-induced empty turn retries once; a second empty result returns a readable temporary-service error and hides the retry instruction from the transcript.
 - **Persistent incremental vectors:** MySQL retains production text and visual vectors; the ingestion index recalculates only when content hash, model, or dimension changes and projects those rows without a second model call. Query-vector caching avoids repeated embedding calls for the same normalized question and model.
-- **Knowledge publication:** offline, not-yet-effective, and expired documents are excluded from keyword, text-vector, visual-vector, and returned-image retrieval. Reactivation reuses unchanged vectors.
-- **Visual retrieval:** `VISION_EMBED_MODEL=qwen3-vl-embedding` downloads Feishu document images, creates incremental image vectors during ingestion, and stores their binaries and vectors in MySQL. Every non-empty employee question can automatically recall related images alongside text; image-related wording is not required. Query vectors are cached, and no visual query call occurs when no eligible image candidate exists.
-- **Feishu media access:** downloading embedded document images requires the released application to have `drive:drive:readonly` and access to the corresponding wiki space or document. A denied media download leaves the approved text available but does not create an image asset or spend visual-model quota.
+- **Online knowledge sources:** administrators add Feishu links directly. Each source synchronizes with its submitter's Feishu user authorization; the system never falls back to a bot or another employee when that authorization is missing. Direct Docx, Sheets, and Bitable links are supported, and Wiki nodes backed by those types become searchable records. Sheets preserve worksheet names, column headers, and row field names; a link that names one worksheet indexes only that worksheet. A SystemAdmin can claim a migrated source by submitting its link again. The fixed group controls maintenance ownership, not employee visibility. Sources synchronize every five minutes by default; a successful content change archives prior published versions atomically, and retrieval reads only the greatest published version number for each document. Soft removal immediately excludes source text, vectors, and images from retrieval, and re-adding the same link reuses unchanged data.
+- **Visual retrieval:** `VISION_EMBED_MODEL=qwen3-vl-embedding` downloads Feishu document images and embedded boards, creates incremental visual vectors during ingestion, and stores their binaries and vectors in MySQL. A board uses its nearest heading as retrieval context and refreshes its exported snapshot on every source synchronization. The configured `VISION_OCR_MODEL` extracts board text during ingestion and stores it in searchable knowledge chunks; an unchanged snapshot reuses both that text and its visual vector without another model request. A changed snapshot replaces the current asset and recalculates only its OCR text and vector. Dense boards use overlapping OCR regions only after the full snapshot reaches the output limit; blank regions contribute no text, and a smallest region can retain complete text fields from an otherwise incomplete structured response. SVG boards are converted to PNG, and only assets exceeding the provider request limit are resized and compressed. Every non-empty employee question can recall board text and related visual assets without image- or board-specific wording. Matching assets render as cards after the answer. Query vectors are cached, and no visual query call occurs when no eligible candidate exists.
+- **Feishu media access:** ordinary embedded images need `docs:document.media:download`, embedded boards need `board:whiteboard:node:read`, and the source submitter must retain access to the corresponding document or board. The portal stores that user's renewable OAuth credential encrypted and brokers only a short-lived access token to Qabot. Ordinary image synchronization sends the parent Docx context and falls back from media download to the source-file preview stream (`preview_type=16`) and temporary URL; boards use Feishu's board-image export endpoint. A denied visual download leaves the last synchronized text and existing asset available, records a source-level warning, and does not spend visual-model quota. MySQL projection preserves each unchanged asset ID so images attached to conversation history remain readable. Automatic visual retrieval requires the asset title to share a specific, non-generic term with the question or answer and uses a `0.45` strong-match threshold or a corroborating pair above `0.40` within a `0.02` margin. Matching assets may come from any active source, and an image explicitly named by the answer remains eligible. Deployments may tune `VISION_MEDIA_STRONG_SCORE`, `VISION_MEDIA_CLUSTER_SCORE`, and `VISION_MEDIA_CLUSTER_MARGIN`.
 - **Feishu permission:** the application needs scopes such as `im:message:send_as_bot`; failed notifications degrade to logs.
 - Tools use `defineTool`; direct registration does not convert parameters to JSON Schema and is rejected by the relay.

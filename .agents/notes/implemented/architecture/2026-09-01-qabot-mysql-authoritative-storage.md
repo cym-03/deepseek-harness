@@ -16,7 +16,7 @@ Model knowledge retrieval reads currently published and effective MySQL versions
 
 DSH session persistence appends a session header and contiguous events transactionally to `dsh_model_sessions` and `dsh_model_session_events`. Resume discovers sessions from MySQL metadata rather than filesystem paths. The one-time importer copies readable legacy JSONL sessions and service-team rows into MySQL and records completion in `qabot_data_imports`; it retains source files as rollback evidence and never recreates a later MySQL deletion.
 
-Knowledge administration still uses the local ingestion index to parse, review, and calculate missing embeddings. Every mutation projects the complete approved state, vectors, assets, version metadata, and submission queue into MySQL before it becomes available to production retrieval. The local index is a rebuildable ingestion source, not the production read authority.
+Knowledge-source configuration and production retrieval use MySQL as their authority. The local ingestion index only parses synchronized content and calculates missing embeddings before the result is projected to MySQL. The online-source lifecycle and maintenance permissions are specified in [Manage Qabot knowledge as synchronized online sources](2026-09-02-qabot-online-knowledge-sources.md).
 
 ## Alternatives considered
 
@@ -28,6 +28,6 @@ Knowledge administration still uses the local ingestion index to parse, review, 
 
 ## Consequences
 
-Production restarts and host changes recover service teams, searchable knowledge, and model history from one schema. Migration 11 creates the staff, session, import-marker, query-cache, and knowledge-submission tables with Asia/Shanghai `DATETIME(3)` business dates. MySQL availability is required for production startup and question handling. The ingestion index must project successfully before newly reviewed knowledge participates in retrieval, while an existing published MySQL version remains available if ingestion or synchronization fails.
+Production restarts and host changes recover service teams, searchable knowledge, and model history from one schema. Migration 11 creates the staff, session, import-marker, query-cache, and knowledge-submission tables with Asia/Shanghai `DATETIME(3)` business dates. MySQL availability is required for production startup and question handling. The ingestion index must project successfully before a new source participates in retrieval, while an existing MySQL version remains available if ingestion or synchronization fails.
 
 MySQL integration tests use an explicit `QABOT_TEST_MYSQL_URL`, unique record identifiers, and cleanup. A live acceptance check must demonstrate a knowledge answer, a persisted raw event batch, and successful resume after a Qabot restart without reading a legacy session file.

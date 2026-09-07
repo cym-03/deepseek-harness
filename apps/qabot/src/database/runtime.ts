@@ -17,6 +17,7 @@ import { TicketStore } from '../ticket/store.ts'
 import { createMysqlPool, loadMysqlMigrations, migrateMysql } from './mysql-migrator.ts'
 import { MysqlKnowledgeProjection } from './mysql-knowledge-projection.ts'
 import { MysqlKnowledgeSearch } from './mysql-knowledge-search.ts'
+import { MysqlKnowledgeSourceRepository } from './mysql-knowledge-sources.ts'
 import {
   MysqlAuditRepository,
   MysqlConversationMessageRepository,
@@ -41,6 +42,7 @@ export interface QabotRepositories {
   messages?: ConversationMessageRepository
   knowledge?: MysqlKnowledgeProjection
   knowledgeSearch?: MysqlKnowledgeSearch
+  knowledgeSources?: MysqlKnowledgeSourceRepository
   staff?: StaffRepository
   mysqlPool?: Pool
   dispose(): Promise<void>
@@ -91,6 +93,7 @@ export async function createQabotRepositories(
       outbox: new MysqlOutboxRepository(pool),
       knowledge: new MysqlKnowledgeProjection(pool),
       knowledgeSearch: new MysqlKnowledgeSearch(pool),
+      knowledgeSources: new MysqlKnowledgeSourceRepository(pool),
       staff,
       mysqlPool: pool,
       dispose: async () => { await pool.end() },

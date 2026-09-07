@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { AuditStore } from '../src/audit/store.ts'
-import { canAccessTicket, isServiceDeskUser } from '../src/security/authorization.ts'
+import { canAccessTicket, canManageKnowledgeSource, isServiceDeskUser } from '../src/security/authorization.ts'
 import type { PortalIdentity } from '../src/security/identity.ts'
 import type { Ticket } from '../src/ticket/store.ts'
 
@@ -26,6 +26,18 @@ describe('ticket authorization', () => {
 
   it('does not expose unassigned tickets to ordinary agents', () => {
     expect(canAccessTicket(identity(['Agent'], ['it']), { ...ticket, department: null })).toBe(false)
+  })
+})
+
+describe('online knowledge-source authorization', () => {
+  it('limits operators to their maintenance group and maps the fallback group', () => {
+    expect(canManageKnowledgeSource(identity(['KnowledgeEditor'], ['人事']), '人事')).toBe(true)
+    expect(canManageKnowledgeSource(identity(['KnowledgeEditor'], ['人事']), '财务')).toBe(false)
+    expect(canManageKnowledgeSource(identity(['Agent'], ['default']), '其他')).toBe(true)
+  })
+
+  it('allows system administrators to maintain every group', () => {
+    expect(canManageKnowledgeSource(identity(['SystemAdmin'], []), 'IT')).toBe(true)
   })
 })
 

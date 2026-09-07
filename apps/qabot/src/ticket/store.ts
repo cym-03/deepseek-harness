@@ -23,6 +23,7 @@ export interface Ticket {
   serviceStart: number | null
   serviceEnd: number | null
   satisfaction: number | null
+  satisfactionComment: string | null
   handoffReason: string | null
   createdAt: number
   updatedAt: number
@@ -41,6 +42,7 @@ interface TicketRow {
   service_start: number | null
   service_end: number | null
   satisfaction: number | null
+  satisfaction_comment: string | null
   handoff_reason: string | null
   created_at: number
   updated_at: number
@@ -60,6 +62,7 @@ function rowToTicket(row: TicketRow): Ticket {
     serviceStart: row.service_start,
     serviceEnd: row.service_end,
     satisfaction: row.satisfaction,
+    satisfactionComment: row.satisfaction_comment,
     handoffReason: row.handoff_reason,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -114,6 +117,12 @@ export class TicketStore implements TicketRepository {
       this.db.exec(`
         ALTER TABLE tickets DROP COLUMN satisfaction_note;
         PRAGMA user_version = 3;
+      `)
+    }
+    if (schemaVersion < 4) {
+      this.db.exec(`
+        ALTER TABLE tickets ADD COLUMN satisfaction_comment TEXT;
+        PRAGMA user_version = 4;
       `)
     }
   }
@@ -319,16 +328,16 @@ export class TicketStore implements TicketRepository {
   }
 
   /** 记录满意度（员工评价回调用），不改状态。返回是否命中。 */
-  rate(ticketId: number, satisfaction: number, expectedVersion?: number): boolean {
+  rate(ticketId: number, satisfaction: number, comment: string | null, expectedVersion?: number): boolean {
     const versionClause = expectedVersion === undefined
       ? ''
       : "AND version = ? AND status IN ('resolved', 'closed') AND satisfaction IS NULL"
     const args = expectedVersion === undefined
-      ? [satisfaction, Date.now(), ticketId]
-      : [satisfaction, Date.now(), ticketId, expectedVersion]
+      ? [satisfaction, comment, Date.now(), ticketId]
+      : [satisfaction, comment, Date.now(), ticketId, expectedVersion]
     const result = this.db.prepare(`
       UPDATE tickets
-      SET satisfaction = ?, updated_at = ?, version = version + 1
+      SET satisfaction = ?, satisfaction_comment = ?, updated_at = ?, version = version + 1
       WHERE id = ? ${versionClause}
     `).run(...args)
     return Number(result.changes) > 0

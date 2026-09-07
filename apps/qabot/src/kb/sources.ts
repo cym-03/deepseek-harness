@@ -1,13 +1,13 @@
 /**
  * 飞书知识源配置存储：读写 data/kb-sources.json。
- * 格式：{ "docx": [{ id, title? }], "bitable": [{ appToken, tableId?, title?, fields? }] }
+ * 格式：{ "docx": [...], "sheets": [...], "bitable": [...], "wiki": [...] }
  */
 
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type { FeishuKbSourcesConfig } from './feishu-sync.ts'
 
-const EMPTY: FeishuKbSourcesConfig = { docx: [], bitable: [], wiki: [] }
+const EMPTY: FeishuKbSourcesConfig = { docx: [], sheets: [], bitable: [], wiki: [] }
 
 export class KbSourcesStore {
   constructor(private readonly file: string) {}
@@ -18,6 +18,7 @@ export class KbSourcesStore {
       const parsed = JSON.parse(readFileSync(this.file, 'utf8')) as Partial<FeishuKbSourcesConfig>
       return {
         docx: Array.isArray(parsed.docx) ? parsed.docx : [],
+        sheets: Array.isArray(parsed.sheets) ? parsed.sheets : [],
         bitable: Array.isArray(parsed.bitable) ? parsed.bitable : [],
         wiki: Array.isArray(parsed.wiki) ? parsed.wiki : [],
       }

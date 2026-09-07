@@ -1,14 +1,16 @@
 /**
- * 飞书知识源同步：把飞书云文档（docx）与多维表格（Bitable）内容拉取进知识库。
+ * 飞书知识源同步：把飞书云文档、电子表格与多维表格内容拉取进知识库。
  * - docx：GET docx/v1/documents/{id}/raw_content 拿纯文本（SDK）
+ * - sheet：查询工作表后分块读取单元格内容
  * - bitable：GET bitable/v1/apps/{app_token}/tables/{table_id}/records 逐页拉（原生 fetch，SDK 封装不全）
- * 需要应用权限：docx:document:readonly（云文档读取）、bitable:app:readonly（多维表格读取）。
+ * 需要应用权限：docx:document:readonly、sheets:spreadsheet:readonly、bitable:app:readonly。
  */
 
 import * as lark from '@larksuiteoapi/node-sdk'
 import type { KbStore } from './store.ts'
-import { collectImageCaptions, storeImageHints, storeVisionAssets } from './image-ocr.ts'
+import { collectVisualHints, storeImageHints, storeVisionAssets } from './image-ocr.ts'
 import { visionEmbeddingsConfigured } from './vision-embed.ts'
+import { feishuContentToken, type FeishuContentCredentials } from './feishu-auth.ts'
 
 const API_BASE = 'https://open.feishu.cn/open-apis'
 
@@ -36,8 +38,19 @@ export interface BitableSource {
   enabled?: boolean
 }
 
+export interface SheetSource {
+  /** 电子表格 token（URL 中 /sheets/ 后的部分）。 */
+  spreadsheetToken: string
+  /** 可选的工作表 id；缺省时同步所有可见工作表。 */
+  sheetId?: string
+  title?: string
+  /** 原文链接（参考文档用）。 */
+  url?: string
+  enabled?: boolean
+}
+
 export interface WikiSource {
-  /** 知识库节点 token（URL 中 /wiki/ 后的部分），可指向文档或多维表格。 */
+  /** 知识库节点 token（URL 中 /wiki/ 后的部分），可指向文档或表格。 */
   nodeToken: string
   /** 若是多维表格节点，需提供表 id（URL 中 ?table= 后）。 */
   tableId?: string
@@ -51,6 +64,7 @@ export interface WikiSource {
 
 export interface FeishuKbSourcesConfig {
   docx: DocxSource[]
+  sheets: SheetSource[]
   bitable: BitableSource[]
   wiki: WikiSource[]
 }
@@ -66,19 +80,6 @@ export function chunkText(text: string): string[] {
     }
   }
   return chunks
-}
-
-async function tenantToken(appId: string, appSecret: string): Promise<string> {
-  const res = await fetch(`${API_BASE}/auth/v3/tenant_access_token/internal`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
-  })
-  const body = await res.json() as { code?: number; tenant_access_token?: string; msg?: string }
-  if (body.code !== 0 || body.tenant_access_token === undefined) {
-    throw new Error(`获取 tenant_access_token 失败 code=${body.code} msg=${body.msg}`)
-  }
-  return body.tenant_access_token
 }
 
 function valueToText(value: unknown, depth = 0): string {
@@ -120,43 +121,53 @@ interface SyncResult {
 
 async function syncDocumentImages(
   kb: KbStore,
-  credentials: { appId: string; appSecret: string },
+  credentials: FeishuContentCredentials,
   documentId: string,
   sourceBase: string,
   title: string,
   url?: string,
 ): Promise<{ hintChunks: number; visionAssets: number }> {
-  const hints = await collectImageCaptions(credentials, documentId)
+  const hints = await collectVisualHints(credentials, documentId)
   const hintChunks = storeImageHints(kb, sourceBase, hints, title)
-  const visionAssets = visionEmbeddingsConfigured()
-    ? await storeVisionAssets(kb, credentials, sourceBase, hints, title, url)
-    : 0
-  return { hintChunks, visionAssets }
+  const visionResult = visionEmbeddingsConfigured()
+    ? await storeVisionAssets(kb, credentials, sourceBase, hints, title, url, documentId)
+    : { stored: 0, failed: 0, firstFailure: '' }
+  if (visionResult.failed > 0) {
+    throw new Error(`视觉素材下载失败：${visionResult.firstFailure}`)
+  }
+  return { hintChunks, visionAssets: visionResult.stored }
 }
 
-/** 同步飞书云文档/多维表格到知识库。 */
+/** 同步飞书云文档、电子表格和多维表格到知识库。 */
 export async function syncFeishuSources(
   client: lark.Client,
   kb: KbStore,
   sources: FeishuKbSourcesConfig,
-  credentials: { appId: string; appSecret: string },
+  credentials: FeishuContentCredentials & { autoPublish?: boolean },
 ): Promise<SyncResult> {
   const result: SyncResult = { synced: 0, failed: 0, errors: [], disabledWiki: [] }
+  const requestOptions = credentials.accessToken === undefined
+    ? undefined
+    : lark.withUserAccessToken(credentials.accessToken)
 
   // ── docx 云文档 ──
   for (const source of sources.docx) {
     if (source.enabled === false) continue
     try {
-      const resp = await client.docx.v1.document.rawContent({ path: { document_id: source.id } })
+      const resp = await client.docx.v1.document.rawContent({ path: { document_id: source.id } }, requestOptions)
       if (resp.code !== 0 || resp.data?.content === undefined) {
         throw new Error(`docx ${source.id} 拉取失败 code=${resp.code} msg=${resp.msg}`)
       }
       const title = source.title ?? source.id
       const chunks = chunkText(resp.data.content)
       const staged = kb.stageChunks(`feishu:docx:${source.id}`, chunks, title, source.url)
-      if (!staged.changed) result.synced += chunks.length
+      if (staged.changed && credentials.autoPublish === true && staged.versionId !== undefined) {
+        kb.publishVersion(staged.versionId, 'system-sync')
+      } else if (credentials.autoPublish === true) {
+        kb.setPublication(`feishu:docx:${source.id}`, true)
+      }
+      result.synced += chunks.length
       try {
-        if (staged.changed) continue
         const images = await syncDocumentImages(
           kb,
           credentials,
@@ -170,7 +181,9 @@ export async function syncFeishuSources(
           console.log(`[kb-sync] docx 视觉索引：${images.visionAssets} 张`)
         }
       } catch (error) {
-        console.error('[kb-sync] docx 图片同步失败:', error instanceof Error ? error.message : error)
+        const message = error instanceof Error ? error.message : String(error)
+        result.errors.push(`视觉素材同步失败：${message}`)
+        console.error('[kb-sync] docx 视觉素材同步失败:', message)
       }
       console.log(`[kb-sync] docx「${title}」→ ${chunks.length} 块`)
     } catch (error) {
@@ -181,7 +194,7 @@ export async function syncFeishuSources(
   }
 
   // ── Bitable 多维表格 ──
-  const token = await tenantToken(credentials.appId, credentials.appSecret)
+  const token = await feishuContentToken(credentials)
   for (const source of sources.bitable) {
     if (source.enabled === false) continue
     try {
@@ -190,12 +203,40 @@ export async function syncFeishuSources(
       const title = source.title ?? '多维表格'
       const chunks = texts.flatMap(chunkText)
       const staged = kb.stageChunks(`bitable:${source.appToken}:${source.tableId}`, chunks, title, source.url)
-      if (!staged.changed) result.synced += chunks.length
+      if (staged.changed && credentials.autoPublish === true && staged.versionId !== undefined) {
+        kb.publishVersion(staged.versionId, 'system-sync')
+      } else if (credentials.autoPublish === true) {
+        kb.setPublication(`bitable:${source.appToken}:${source.tableId}`, true)
+      }
+      result.synced += chunks.length
       console.log(`[kb-sync] bitable「${title}」→ ${rows.length} 行 / ${chunks.length} 块`)
     } catch (error) {
       result.failed += 1
       result.errors.push(error instanceof Error ? error.message : String(error))
       console.error('[kb-sync] bitable 同步失败:', error instanceof Error ? error.message : error)
+    }
+  }
+
+  // ── 直接电子表格链接 ──
+  for (const source of sources.sheets) {
+    if (source.enabled === false) continue
+    try {
+      const texts = await fetchSpreadsheetTexts(token, source.spreadsheetToken, source.sheetId)
+      const title = source.title ?? '电子表格'
+      const chunks = texts.flatMap(chunkText)
+      const sourceKey = `sheet:${source.spreadsheetToken}:${source.sheetId ?? ''}`
+      const staged = kb.stageChunks(sourceKey, chunks, title, source.url)
+      if (staged.changed && credentials.autoPublish === true && staged.versionId !== undefined) {
+        kb.publishVersion(staged.versionId, 'system-sync')
+      } else if (credentials.autoPublish === true) {
+        kb.setPublication(sourceKey, true)
+      }
+      result.synced += chunks.length
+      console.log(`[kb-sync] 电子表格「${title}」→ ${texts.length} 行 / ${chunks.length} 块`)
+    } catch (error) {
+      result.failed += 1
+      result.errors.push(error instanceof Error ? error.message : String(error))
+      console.error('[kb-sync] 电子表格同步失败:', error instanceof Error ? error.message : error)
     }
   }
 
@@ -205,16 +246,20 @@ export async function syncFeishuSources(
     try {
       const node = await resolveWikiNode(token, source.nodeToken)
       if (node.obj_type === 'docx' || node.obj_type === 'doc') {
-        const resp = await client.docx.v1.document.rawContent({ path: { document_id: node.obj_token } })
+        const resp = await client.docx.v1.document.rawContent({ path: { document_id: node.obj_token } }, requestOptions)
         if (resp.code !== 0 || resp.data?.content === undefined) {
           throw new Error(`wiki 文档拉取失败 code=${resp.code} msg=${resp.msg}`)
         }
         const title = source.title ?? node.title ?? node.obj_token
         const chunks = chunkText(resp.data.content)
         const staged = kb.stageChunks(`wiki:${source.nodeToken}`, chunks, title, source.url)
-        if (!staged.changed) result.synced += chunks.length
+        if (staged.changed && credentials.autoPublish === true && staged.versionId !== undefined) {
+          kb.publishVersion(staged.versionId, 'system-sync')
+        } else if (credentials.autoPublish === true) {
+          kb.setPublication(`wiki:${source.nodeToken}`, true)
+        }
+        result.synced += chunks.length
         try {
-          if (staged.changed) continue
           const images = await syncDocumentImages(
             kb,
             credentials,
@@ -228,7 +273,9 @@ export async function syncFeishuSources(
             console.log(`[kb-sync] wiki 视觉索引：${images.visionAssets} 张`)
           }
         } catch (error) {
-          console.error('[kb-sync] wiki 图片同步失败:', error instanceof Error ? error.message : error)
+          const message = error instanceof Error ? error.message : String(error)
+          result.errors.push(`视觉素材同步失败：${message}`)
+          console.error('[kb-sync] wiki 视觉素材同步失败:', message)
         }
         console.log(`[kb-sync] wiki 文档「${title}」→ ${chunks.length} 块`)
       } else if (node.obj_type === 'bitable') {
@@ -240,10 +287,27 @@ export async function syncFeishuSources(
         const title = source.title ?? node.title ?? '多维表格'
         const chunks = texts.flatMap(chunkText)
         const staged = kb.stageChunks(`wiki:${source.nodeToken}`, chunks, title, source.url)
-        if (!staged.changed) result.synced += chunks.length
+        if (staged.changed && credentials.autoPublish === true && staged.versionId !== undefined) {
+          kb.publishVersion(staged.versionId, 'system-sync')
+        } else if (credentials.autoPublish === true) {
+          kb.setPublication(`wiki:${source.nodeToken}`, true)
+        }
+        result.synced += chunks.length
         console.log(`[kb-sync] wiki 表格「${title}」→ ${rows.length} 行 / ${chunks.length} 块`)
+      } else if (node.obj_type === 'sheet') {
+        const texts = await fetchSpreadsheetTexts(token, node.obj_token, sheetIdFromUrl(source.url))
+        const title = source.title ?? node.title ?? '电子表格'
+        const chunks = texts.flatMap(chunkText)
+        const staged = kb.stageChunks(`wiki:${source.nodeToken}`, chunks, title, source.url)
+        if (staged.changed && credentials.autoPublish === true && staged.versionId !== undefined) {
+          kb.publishVersion(staged.versionId, 'system-sync')
+        } else if (credentials.autoPublish === true) {
+          kb.setPublication(`wiki:${source.nodeToken}`, true)
+        }
+        result.synced += chunks.length
+        console.log(`[kb-sync] wiki 电子表格「${title}」→ ${texts.length} 行 / ${chunks.length} 块`)
       } else {
-        throw new Error(`wiki 节点类型 ${node.obj_type} 暂不支持（仅 docx/bitable）`)
+        throw new Error(`wiki 节点类型 ${node.obj_type} 暂不支持（仅 docx/sheet/bitable）`)
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -272,6 +336,113 @@ interface WikiNodeInfo {
   obj_type: string
   obj_token: string
   title: string | undefined
+}
+
+interface SpreadsheetSheet {
+  sheetId: string
+  title: string
+  rowCount: number
+  columnCount: number
+}
+
+function sheetIdFromUrl(url: string | undefined): string | undefined {
+  if (url === undefined) return undefined
+  try {
+    const parsed = new URL(url)
+    return parsed.searchParams.get('sheet') ?? parsed.searchParams.get('sheetId') ?? undefined
+  } catch {
+    return undefined
+  }
+}
+
+function spreadsheetColumnName(columnCount: number): string {
+  let value = columnCount
+  let name = ''
+  while (value > 0) {
+    value -= 1
+    name = String.fromCharCode(65 + (value % 26)) + name
+    value = Math.floor(value / 26)
+  }
+  return name
+}
+
+/** Converts one worksheet's returned cell matrix into searchable row records. */
+export function formatSpreadsheetRows(title: string, values: unknown[][]): string[] {
+  const rows = values.map(row => row.map(cell => valueToText(cell).trim()))
+  const firstContentRow = rows.findIndex(row => row.some(Boolean))
+  if (firstContentRow < 0) return []
+  const headers = rows[firstContentRow] ?? []
+  const result = [`工作表：${title}\n表头：${headers.filter(Boolean).join('、')}`]
+  for (let index = firstContentRow + 1; index < rows.length; index += 1) {
+    const row = rows[index] ?? []
+    if (!row.some(Boolean)) continue
+    const fields = row.flatMap((value, column) => {
+      if (value === '') return []
+      return [`${headers[column] || `列${column + 1}`}：${value}`]
+    })
+    result.push(`工作表：${title}\n${fields.join('\n')}`)
+  }
+  return result
+}
+
+/** Reads visible worksheets with the submitter's Feishu access token. */
+export async function fetchSpreadsheetTexts(
+  token: string,
+  spreadsheetToken: string,
+  requestedSheetId?: string,
+): Promise<string[]> {
+  const queryUrl = `${API_BASE}/sheets/v3/spreadsheets/${encodeURIComponent(spreadsheetToken)}/sheets/query`
+  const queryResponse = await fetch(queryUrl, { headers: { authorization: `Bearer ${token}` } })
+  const queryBody = await queryResponse.json() as {
+    code?: number
+    msg?: string
+    data?: { sheets?: Array<{
+      sheet_id?: string
+      title?: string
+      hidden?: boolean
+      grid_properties?: { row_count?: number; column_count?: number }
+    }> }
+  }
+  if (queryBody.code !== 0) {
+    throw new Error(`电子表格工作表列表失败 code=${queryBody.code} msg=${queryBody.msg}`)
+  }
+  const sheets: SpreadsheetSheet[] = (queryBody.data?.sheets ?? []).flatMap((sheet) => {
+    if (sheet.sheet_id === undefined || sheet.hidden === true) return []
+    if (requestedSheetId !== undefined && sheet.sheet_id !== requestedSheetId) return []
+    return [{
+      sheetId: sheet.sheet_id,
+      title: sheet.title ?? sheet.sheet_id,
+      rowCount: Math.max(0, sheet.grid_properties?.row_count ?? 0),
+      columnCount: Math.max(0, sheet.grid_properties?.column_count ?? 0),
+    }]
+  })
+  if (requestedSheetId !== undefined && sheets.length === 0) {
+    throw new Error(`电子表格中未找到工作表 ${requestedSheetId}`)
+  }
+
+  const texts: string[] = []
+  for (const sheet of sheets) {
+    if (sheet.rowCount === 0 || sheet.columnCount === 0) continue
+    const rows: unknown[][] = []
+    const rowsPerRequest = Math.max(1, Math.floor(5_000 / sheet.columnCount))
+    for (let startRow = 1; startRow <= sheet.rowCount; startRow += rowsPerRequest) {
+      const endRow = Math.min(sheet.rowCount, startRow + rowsPerRequest - 1)
+      const range = `${sheet.sheetId}!A${startRow}:${spreadsheetColumnName(sheet.columnCount)}${endRow}`
+      const valuesUrl = `${API_BASE}/sheets/v2/spreadsheets/${encodeURIComponent(spreadsheetToken)}/values/${encodeURIComponent(range)}`
+      const valuesResponse = await fetch(valuesUrl, { headers: { authorization: `Bearer ${token}` } })
+      const valuesBody = await valuesResponse.json() as {
+        code?: number
+        msg?: string
+        data?: { valueRange?: { values?: unknown[][] }; value_range?: { values?: unknown[][] } }
+      }
+      if (valuesBody.code !== 0) {
+        throw new Error(`电子表格单元格读取失败 code=${valuesBody.code} msg=${valuesBody.msg}`)
+      }
+      rows.push(...(valuesBody.data?.valueRange?.values ?? valuesBody.data?.value_range?.values ?? []))
+    }
+    texts.push(...formatSpreadsheetRows(sheet.title, rows))
+  }
+  return texts
 }
 
 /** 解析知识库节点，拿到底层对象类型与 token。 */

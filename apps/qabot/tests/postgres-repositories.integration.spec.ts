@@ -59,8 +59,8 @@ describePostgres('PostgreSQL Repository integration', () => {
       expect(await tickets.closeStaleConversations(Date.now() + 1)).toBeGreaterThanOrEqual(1)
       const closed = await tickets.get(ticket.id)
       if (closed === undefined) throw new Error('expected closed ticket')
-      expect(await tickets.rate(ticket.id, 5, closed.version)).toBe(true)
-      expect(await tickets.rate(ticket.id, 1, closed.version)).toBe(false)
+      expect(await tickets.rate(ticket.id, 5, '满意', closed.version)).toBe(true)
+      expect(await tickets.rate(ticket.id, 1, null, closed.version)).toBe(false)
 
       const outbox = new PostgresOutboxRepository(sql)
       expect(await outbox.enqueue(outboxKey, 'ticket.handoff', { ticketId: ticket.id })).toBe(true)

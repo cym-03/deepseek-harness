@@ -19,10 +19,9 @@ import { Qabot } from './runner.ts'
 import { runConsole } from './console.ts'
 import { FeishuGateway } from './feishu/gateway.ts'
 import { FeishuNotificationAdapter } from './feishu/notify.ts'
-import { startHttpServer } from './http/server.ts'
+import { parseFeishuUrl, startHttpServer } from './http/server.ts'
 import { StaffStore } from './staff/store.ts'
-import { KbSourcesStore } from './kb/sources.ts'
-import { syncFeishuSources } from './kb/feishu-sync.ts'
+import { syncFeishuSources, type FeishuKbSourcesConfig } from './kb/feishu-sync.ts'
 import { enableFileLog } from './log.ts'
 import * as lark from '@larksuiteoapi/node-sdk'
 import { OutboxWorker, type OutboxHandler } from './integration/outbox.ts'
@@ -32,6 +31,8 @@ import { loadMysqlMigrations, migrateMysqlUrl } from './database/mysql-migrator.
 import { loadConversationTimeline } from './conversation/timeline.ts'
 import { MysqlStaffRepository } from './database/mysql-repositories.ts'
 import { importLegacyJsonlSessions } from './database/mysql-session-import.ts'
+import type { KnowledgeSourceRecord } from './database/mysql-knowledge-sources.ts'
+import { fetchSubmitterFeishuToken } from './kb/portal-user-token.ts'
 
 const root = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..')
 const appDir = join(root, 'apps', 'qabot')
@@ -106,7 +107,8 @@ async function cmdMigrateMysql(): Promise<void> {
 }
 
 async function cmdProjectMessages(): Promise<void> {
-  const { qabot, repositories, dispose } = await buildQabot()
+  const runtime = await buildQabot()
+  const { qabot, repositories } = runtime
   const kb = new KbStore(kbDbPath)
   try {
     if (repositories.messages === undefined) throw new Error('当前数据库后端未配置聊天消息投影')
@@ -125,16 +127,17 @@ async function cmdProjectMessages(): Promise<void> {
     if (failures.length > 0) throw new Error(`有 ${failures.length} 个会话投影失败：${failures.join('; ')}`)
   } finally {
     kb.dispose()
-    await dispose()
+    await runtime.dispose()
   }
 }
 
 async function cmdConsole(): Promise<void> {
-  const { qabot, repositories, dispose } = await buildQabot()
+  const runtime = await buildQabot()
+  const { qabot, repositories } = runtime
   try {
     await runConsole(qabot, repositories.tickets)
   } finally {
-    await dispose()
+    await runtime.dispose()
   }
 }
 
@@ -146,7 +149,8 @@ async function cmdFeishu(): Promise<void> {
     process.exitCode = 1
     return
   }
-  const { qabot, dispose } = await buildQabot()
+  const runtime = await buildQabot()
+  const { qabot } = runtime
   const gateway = new FeishuGateway({ appId, appSecret }, qabot)
   // 优雅退出：Ctrl+C 时清理。
   let shuttingDown = false
@@ -154,7 +158,7 @@ async function cmdFeishu(): Promise<void> {
     if (shuttingDown) return
     shuttingDown = true
     console.log('\n[feishu] 正在退出…')
-    await dispose()
+    await runtime.dispose()
     process.exit(0)
   }
   process.on('SIGINT', () => { void shutdown() })
@@ -164,13 +168,14 @@ async function cmdFeishu(): Promise<void> {
     console.log('[feishu] 网关运行中，Ctrl+C 退出')
     await new Promise<void>(() => {}) // 常驻
   } finally {
-    await dispose()
+    await runtime.dispose()
   }
 }
 
 /** 启动 HTTP 服务（供门户 NestJS smart-qa 模块薄代理）。 */
 async function cmdServe(): Promise<void> {
-  const { qabot, repositories, dispose } = await buildQabot()
+  const runtime = await buildQabot()
+  const { qabot, repositories } = runtime
   const { tickets, audit, outbox } = repositories
   const kb = new KbStore(kbDbPath)
   const projectKnowledge = repositories.knowledge === undefined
@@ -241,17 +246,72 @@ async function cmdServe(): Promise<void> {
   const outboxTimer = setInterval(() => { void outboxWorker.runOnce() }, outboxIntervalMs)
   outboxTimer.unref()
   void outboxWorker.runOnce()
-  // 飞书知识源（云文档/多维表格）同步入口。
-  const kbSources = new KbSourcesStore(join(dataDir, 'kb-sources.json'))
-  const syncFeishu = feishu !== undefined
-    ? async () => {
-      const result = await syncFeishuSources(feishu.client, kb, kbSources.load(), { appId: feishu.appId, appSecret: feishu.appSecret })
-      const disabled = kbSources.disableWiki(result.disabledWiki)
-      if (disabled > 0) console.warn(`[kb-sync] 已自动停用 ${disabled} 个不存在的 wiki 知识源`)
-      await projectKnowledge?.()
-      return result
+  // 飞书知识源配置以 MySQL 为准；本地 kb.db 只承担同步工作索引和向量复用。
+  const sourceConfig = (source: KnowledgeSourceRecord): FeishuKbSourcesConfig => {
+    const parsed = parseFeishuUrl(source.url)
+    if (parsed === null) throw new Error('KNOWLEDGE_URL_INVALID')
+    if (parsed.kind === 'docx') {
+      return { docx: [{ id: parsed.token, title: source.title, url: source.url }], sheets: [], bitable: [], wiki: [] }
+    }
+    if (parsed.kind === 'sheet') {
+      return { docx: [], sheets: [{ spreadsheetToken: parsed.token, title: source.title, url: source.url,
+        ...(parsed.sheetId === undefined ? {} : { sheetId: parsed.sheetId }) }], bitable: [], wiki: [] }
+    }
+    if (parsed.kind === 'bitable') {
+      if (parsed.tableId === undefined) throw new Error('KNOWLEDGE_URL_INVALID')
+      return {
+        docx: [],
+        sheets: [],
+        bitable: [{ appToken: parsed.token, tableId: parsed.tableId, title: source.title, url: source.url }],
+        wiki: [],
+      }
+    }
+    return { docx: [], sheets: [], bitable: [], wiki: [{ nodeToken: parsed.token, title: source.title, url: source.url,
+      ...(parsed.tableId === undefined ? {} : { tableId: parsed.tableId }) }] }
+  }
+  const knowledgeSources = repositories.knowledgeSources
+  const syncKnowledgeSource = feishu !== undefined && knowledgeSources !== undefined
+    ? async (source: KnowledgeSourceRecord) => {
+      await knowledgeSources.markSyncing(source.id)
+      try {
+        const accessToken = await fetchSubmitterFeishuToken(source.submitterEmployeeId)
+        const result = await syncFeishuSources(feishu.client, kb, sourceConfig(source), {
+          appId: feishu.appId,
+          appSecret: feishu.appSecret,
+          accessToken,
+          autoPublish: true,
+        })
+        if (result.failed > 0) throw new Error(result.errors.join('; ') || '知识源同步失败')
+        kb.setPublication(source.sourceKey, true)
+        await kb.embedMissing()
+        await kb.embedVisionMissing()
+        await projectKnowledge?.()
+        await knowledgeSources.markReady(source.id, result.errors.length > 0 ? result.errors.join('; ') : null)
+        await audit.append({ actorId: 'system-sync', action: 'knowledge.source.sync',
+          resourceType: 'knowledge-source', resourceId: String(source.id),
+          detail: JSON.stringify({ synced: result.synced, warnings: result.errors.length }) })
+        return result
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        await knowledgeSources.markFailed(source.id, message)
+        await audit.append({ actorId: 'system-sync', action: 'knowledge.source.sync_failed',
+          resourceType: 'knowledge-source', resourceId: String(source.id), detail: JSON.stringify({ error: message }) })
+        return { synced: 0, failed: 1, errors: [message], disabledWiki: [] }
+      }
     }
     : undefined
+  const syncAllKnowledgeSources = syncKnowledgeSource === undefined || knowledgeSources === undefined
+    ? undefined
+    : async () => {
+      const aggregate = { synced: 0, failed: 0, errors: [] as string[] }
+      for (const source of await knowledgeSources.list()) {
+        const result = await syncKnowledgeSource(source)
+        aggregate.synced += result.synced
+        aggregate.failed += result.failed
+        aggregate.errors.push(...result.errors)
+      }
+      return aggregate
+    }
   const port = Number(process.env.QABOT_PORT ?? 3100)
   // QABOT 只作为门户后端的内部服务，默认禁止局域网直接访问。
   const host = process.env.QABOT_HOST ?? '127.0.0.1'
@@ -261,7 +321,7 @@ async function cmdServe(): Promise<void> {
     if (shuttingDown) return
     shuttingDown = true
     console.log('\n[serve] 正在退出…')
-    await dispose()
+    await runtime.dispose()
     process.exit(0)
   }
   process.on('SIGINT', () => { void shutdown() })
@@ -279,19 +339,20 @@ async function cmdServe(): Promise<void> {
     outbox,
     ...repositories.messages === undefined ? {} : { messages: repositories.messages },
     ...projectKnowledge !== undefined ? { projectKnowledge } : {},
-    ...syncFeishu !== undefined ? { sources: kbSources, syncFeishu } : {},
+    ...knowledgeSources === undefined ? {} : { knowledgeSources },
+    ...syncKnowledgeSource === undefined ? {} : { syncKnowledgeSource },
   })
 
-  // 定时同步知识库（飞书文档/表格变更自动拉取）。QABOT_SYNC_INTERVAL_MINUTES=0 关闭，默认 30 分钟。
-  if (syncFeishu !== undefined) {
-    const intervalMin = Number(process.env.QABOT_SYNC_INTERVAL_MINUTES ?? 30)
+  // 定时同步知识库（飞书文档/表格变更自动拉取）。QABOT_SYNC_INTERVAL_MINUTES=0 关闭，默认 5 分钟。
+  if (syncAllKnowledgeSources !== undefined) {
+    const intervalMin = Number(process.env.QABOT_SYNC_INTERVAL_MINUTES ?? 5)
     if (Number.isFinite(intervalMin) && intervalMin > 0) {
       let syncing = false
       const runSync = async (): Promise<void> => {
         if (syncing) return
         syncing = true
         try {
-          const result = await syncFeishu()
+          const result = await syncAllKnowledgeSources()
           console.log(`[kb-sync] 定时同步完成 synced=${result.synced} failed=${result.failed}`)
           if (result.errors.length > 0) {
             console.error('[kb-sync] 定时同步部分失败:', result.errors.join('; '))

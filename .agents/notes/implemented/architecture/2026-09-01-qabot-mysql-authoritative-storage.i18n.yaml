@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-09-01-qabot-mysql-authoritative-storage.md
-2026-09-01-qabot-mysql-authoritative-storage.md: 57da97cbb9fdf710da09615ec6f1542310c830c7
-2026-09-01-qabot-mysql-authoritative-storage.zh.md: 125d5858c1da080d41e4a51ff0f2bf14371aa35d
+2026-09-01-qabot-mysql-authoritative-storage.md: db5ed401da2f4ef76934eaa7712915ffb8142bd8
+2026-09-01-qabot-mysql-authoritative-storage.zh.md: 5187b3cdb9131c5969c1bce10b6954247fe1bf6c

@@ -1,8 +1,11 @@
 /** DashScope 多模态向量调用，用于员工文本查询与知识库图片的跨模态检索。 */
 
+import sharp from 'sharp'
+
 const DEFAULT_VISION_MODEL = 'qwen3-vl-embedding'
 const DEFAULT_VISION_BASE_URL = 'https://dashscope.aliyuncs.com/api/v1'
 const MULTIMODAL_PATH = '/services/embeddings/multimodal-embedding/multimodal-embedding'
+const MAX_VISION_REQUEST_IMAGE_BYTES = 7 * 1024 * 1024
 
 function apiKey(): string {
   return process.env.VISION_EMBED_API_KEY ?? process.env.EMBED_API_KEY ?? ''
@@ -55,7 +58,25 @@ export async function embedVisionText(text: string): Promise<number[]> {
   return embed({ text })
 }
 
+/** Normalizes SVG boards and shrinks oversized assets for the provider request. */
+export async function prepareVisionImageForEmbedding(data: Buffer, mime: string): Promise<{ data: Buffer; mime: string }> {
+  const normalized = mime.toLowerCase() === 'image/svg+xml'
+    ? { data: await sharp(data, { failOn: 'none' }).png().toBuffer(), mime: 'image/png' }
+    : { data, mime }
+  if (normalized.data.byteLength <= MAX_VISION_REQUEST_IMAGE_BYTES) return normalized
+  for (const [size, quality] of [[4096, 82], [3072, 74], [2048, 66], [1536, 58]] as const) {
+    const converted = await sharp(normalized.data, { failOn: 'none' })
+      .rotate()
+      .resize({ width: size, height: size, fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality, mozjpeg: true })
+      .toBuffer()
+    if (converted.byteLength <= MAX_VISION_REQUEST_IMAGE_BYTES) return { data: converted, mime: 'image/jpeg' }
+  }
+  throw new Error('图片压缩后仍超过视觉向量服务的大小限制')
+}
+
 /** 为知识库图片生成视觉模型空间中的向量。 */
 export async function embedVisionImage(data: Buffer, mime: string): Promise<number[]> {
-  return embed({ image: `data:${mime};base64,${data.toString('base64')}` })
+  const prepared = await prepareVisionImageForEmbedding(data, mime)
+  return embed({ image: `data:${prepared.mime};base64,${prepared.data.toString('base64')}` })
 }

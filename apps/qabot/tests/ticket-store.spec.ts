@@ -43,7 +43,8 @@ describe('ticket migrations and concurrency', () => {
     try {
       const columns = migrated.prepare('PRAGMA table_info(tickets)').all() as unknown as Array<{ name: string }>
       expect(columns.some(column => column.name === 'satisfaction_note')).toBe(false)
-      expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(3)
+      expect(columns.some(column => column.name === 'satisfaction_comment')).toBe(true)
+      expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(4)
     } finally {
       migrated.close()
     }
@@ -67,9 +68,9 @@ describe('ticket migrations and concurrency', () => {
       expect(store.get(opened.id)).toMatchObject({ status: 'waiting_employee', version: 4 })
       expect(store.replies(opened.id)).toHaveLength(1)
       expect(store.close(opened.id, null, 4)).toBe(true)
-      expect(store.rate(opened.id, 4, 5)).toBe(true)
-      expect(store.rate(opened.id, 2, 5)).toBe(false)
-      expect(store.get(opened.id)).toMatchObject({ status: 'closed', satisfaction: 4, version: 6 })
+      expect(store.rate(opened.id, 4, '处理得很快', 5)).toBe(true)
+      expect(store.rate(opened.id, 2, null, 5)).toBe(false)
+      expect(store.get(opened.id)).toMatchObject({ status: 'closed', satisfaction: 4, satisfactionComment: '处理得很快', version: 6 })
     } finally {
       store.dispose()
     }
