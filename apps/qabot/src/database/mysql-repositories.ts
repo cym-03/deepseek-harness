@@ -62,7 +62,7 @@ export class MysqlConversationRepository implements ConversationRepository {
   async findEmpty(userKey: string): Promise<Conversation | undefined> {
     const [rows] = await this.pool.execute<ConversationRow[]>(`
       SELECT user_key, session_id, title, created_at, last_message_at, message_count
-      FROM conversations WHERE user_key = ? AND message_count = 0 AND archived_at IS NULL
+      FROM conversations WHERE user_key = ? AND message_count = 0 AND title = '新对话' AND archived_at IS NULL
       ORDER BY last_message_at DESC LIMIT 1
     `, [userKey])
     return rows[0] === undefined ? undefined : toConversation(rows[0])
@@ -253,6 +253,11 @@ export class MysqlAuditRepository implements AuditRepository {
       INSERT INTO audit_records (actor_id, action, resource_type, resource_id, detail, created_at)
       VALUES (?, ?, ?, ?, ?, ?)
     `, [input.actorId, input.action, input.resourceType, input.resourceId, input.detail, toMysqlDate(createdAt)])
+    const content = `${input.resourceType} ${input.resourceId}${input.detail === null ? '' : `：${input.detail}`}`
+    await this.pool.execute(`INSERT INTO operation_audit_logs
+      (source_key,actor_id,actor_name,action_code,action_name,content,result,resource_type,resource_id,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`, [`qabot:${result.insertId}`, input.actorId, input.actorId, input.action, input.action,
+      content, input.action.includes('failed') ? '失败' : '成功', input.resourceType, input.resourceId, toMysqlDate(createdAt)])
     return { id: result.insertId, ...input, createdAt }
   }
 
@@ -656,23 +661,25 @@ export class MysqlTicketRepository implements TicketRepository {
   }
 
   async resolve(sessionId: string): Promise<void> {
-    await this.pool.execute("UPDATE tickets SET status = 'resolved', updated_at = ?, version = version + 1 WHERE session_id = ? AND status = 'open'",
-      [toMysqlDate(Date.now()), sessionId])
+    const now = toMysqlDate(Date.now())
+    await this.pool.execute("UPDATE tickets SET status = 'resolved', resolved_at = COALESCE(resolved_at, ?), resolution_time_estimated = 0, updated_at = ?, version = version + 1 WHERE session_id = ? AND status = 'open'",
+      [now, now, sessionId])
   }
 
   async closeStaleConversations(cutoff: number): Promise<number> {
     const now = Date.now()
     const [result] = await this.pool.execute<ResultSetHeader>(`UPDATE tickets SET status = 'closed',
-      service_end = COALESCE(service_end, ?), updated_at = ?, version = version + 1
+      service_end = COALESCE(service_end, ?), resolved_at = COALESCE(resolved_at, ?), resolution_time_estimated = 0, updated_at = ?, version = version + 1
       WHERE updated_at <= ? AND ((kind = 'ai' AND status = 'open')
-        OR status IN ('in_service', 'waiting_employee', 'reopened'))`, [toMysqlDate(now), toMysqlDate(now), toMysqlDate(cutoff)])
+        OR status IN ('in_service', 'waiting_employee', 'reopened'))`, [toMysqlDate(now), toMysqlDate(now), toMysqlDate(now), toMysqlDate(cutoff)])
     return result.affectedRows
   }
 
   async close(ticketId: number, satisfaction: number | null, expectedVersion?: number): Promise<boolean> {
+    const now = toMysqlDate(Date.now())
     return await this.updateWithOptionalVersion(
-      'UPDATE tickets SET status = \'closed\', satisfaction = ?, updated_at = ?, version = version + 1 WHERE id = ?',
-      [satisfaction, toMysqlDate(Date.now()), ticketId], expectedVersion,
+      'UPDATE tickets SET status = \'closed\', satisfaction = ?, resolved_at = COALESCE(resolved_at, ?), resolution_time_estimated = 0, updated_at = ?, version = version + 1 WHERE id = ?',
+      [satisfaction, now, now, ticketId], expectedVersion,
     )
   }
 

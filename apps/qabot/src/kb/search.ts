@@ -61,8 +61,20 @@ const GENERIC_VISUAL_TERMS = new Set([
   '公司', '员工', '信息', '图片', '申请', '审批', '流程', '相关', '管理', '说明', '画板',
 ])
 
+const EMPLOYEE_LIFECYCLE_TOPICS = ['入职', '离职', '转正', '晋升', '调动', '退休'] as const
+
 function normalizedVisualText(value: string): string {
   return value.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '')
+}
+
+function specificBigrams(value: string): string[] {
+  const normalized = normalizedVisualText(value)
+  const terms: string[] = []
+  for (let index = 0; index < normalized.length - 1; index += 1) {
+    const term = normalized.slice(index, index + 2)
+    if (!GENERIC_VISUAL_TERMS.has(term)) terms.push(term)
+  }
+  return terms
 }
 
 /** Requires an automatic visual match to share a specific title term with the question or answer. */
@@ -70,12 +82,23 @@ export function visionTitleMatchesContext(title: string, description: string, qu
   if (/^图片：/.test(title) && !/图片说明：\S/.test(description)) return false
   const rawTitle = title.replace(/^(?:图片|画板)[:：]\s*/, '').replace(/^[（(]?[一二三四五六七八九十0-9]+[）)]?[、.．-]?\s*/, '')
   const normalizedTitle = normalizedVisualText(rawTitle)
+  const normalizedQuery = normalizedVisualText(query)
   const context = normalizedVisualText(`${query}\n${supportingText}`)
-  for (let index = 0; index < normalizedTitle.length - 1; index += 1) {
-    const term = normalizedTitle.slice(index, index + 2)
-    if (!GENERIC_VISUAL_TERMS.has(term) && context.includes(term)) return true
-  }
-  return false
+  const titleLifecycleTopics = EMPLOYEE_LIFECYCLE_TOPICS.filter(topic => normalizedTitle.includes(topic))
+  const queryLifecycleTopics = EMPLOYEE_LIFECYCLE_TOPICS.filter(topic => normalizedQuery.includes(topic))
+  const contextLifecycleTopics = EMPLOYEE_LIFECYCLE_TOPICS.filter(topic => context.includes(topic))
+  if (queryLifecycleTopics.length > 0
+    && !titleLifecycleTopics.some(topic => queryLifecycleTopics.includes(topic))) return false
+  if (titleLifecycleTopics.length > 0
+    && contextLifecycleTopics.length > 0
+    && !titleLifecycleTopics.some(topic => contextLifecycleTopics.includes(topic))) return false
+  const matchingTitleTerms = specificBigrams(rawTitle).filter(term => normalizedQuery.includes(term))
+  if (matchingTitleTerms.length === 0) return false
+  if (!/^画板：/.test(title)) return true
+  const ocrText = description.match(/画板识别文字：([\s\S]+)/)?.[1]?.trim()
+  if (ocrText === undefined || ocrText === '' || ocrText === '未识别到可用文字') return false
+  const normalizedOcr = normalizedVisualText(ocrText)
+  return matchingTitleTerms.some(term => normalizedOcr.includes(term))
 }
 
 /**

@@ -66,10 +66,64 @@ describe('visual title grounding', () => {
   it('keeps a related visual from another document', () => {
     expect(visionTitleMatchesContext(
       '画板：财务报销流程',
-      '【画板】财务报销流程',
+      '【画板】财务报销流程\n画板识别文字：提交财务报销申请并完成审批',
       '报销费用需要经过哪些步骤？',
       '请先提交财务报销申请。',
     )).toBe(true)
+  })
+
+  it('rejects an onboarding board for an offboarding question', () => {
+    expect(visionTitleMatchesContext(
+      '画板：（三）入职流程',
+      '【画板】（三）入职流程\n填写入职资料\n办理工牌',
+      '员工离职流程是什么？',
+      '离职前需要提交离职申请并完成工作交接。',
+    )).toBe(false)
+  })
+
+  it('keeps an offboarding board for an offboarding question', () => {
+    expect(visionTitleMatchesContext(
+      '画板：离职流程',
+      '【画板】离职流程\n画板识别文字：提交离职申请\n完成工作交接',
+      '员工离职流程是什么？',
+      '离职前需要提交离职申请并完成工作交接。',
+    )).toBe(true)
+  })
+
+  it('rejects a contract-renewal board for an explicit offboarding question', () => {
+    expect(visionTitleMatchesContext(
+      '画板：（二）劳动合同的续订',
+      '【画板】（二）劳动合同的续订\n劳动合同续订审批',
+      '员工离职流程是什么？',
+      '合同期内离职需要提前申请并完成离职交接。',
+    )).toBe(false)
+  })
+
+  it('rejects a board whose OCR content does not support its matching title', () => {
+    expect(visionTitleMatchesContext(
+      '画板：报销审批流程',
+      '【画板】报销审批流程\n画板识别文字：新员工填写入职资料并领取工牌',
+      '报销审批需要经过哪些步骤？',
+      '请提交报销申请。',
+    )).toBe(false)
+  })
+
+  it('does not let an answer introduce a board topic absent from the question', () => {
+    expect(visionTitleMatchesContext(
+      '画板：（三）入职流程',
+      '【画板】（三）入职流程\n画板识别文字：新员工填写入职资料并领取工牌',
+      '请展示报销审批流程图。',
+      '入职体检费用可以在转正后申请报销。',
+    )).toBe(false)
+  })
+
+  it('rejects a board without usable OCR text', () => {
+    expect(visionTitleMatchesContext(
+      '画板：报销审批流程',
+      '【画板】报销审批流程',
+      '报销审批需要经过哪些步骤？',
+      '请提交报销申请。',
+    )).toBe(false)
   })
 
   it('rejects an unlabeled document image even when its generic title is cited', () => {

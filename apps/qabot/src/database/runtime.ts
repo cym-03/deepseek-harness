@@ -18,6 +18,7 @@ import { createMysqlPool, loadMysqlMigrations, migrateMysql } from './mysql-migr
 import { MysqlKnowledgeProjection } from './mysql-knowledge-projection.ts'
 import { MysqlKnowledgeSearch } from './mysql-knowledge-search.ts'
 import { MysqlKnowledgeSourceRepository } from './mysql-knowledge-sources.ts'
+import { MysqlOperationsRepository } from '../report/operations.ts'
 import {
   MysqlAuditRepository,
   MysqlConversationMessageRepository,
@@ -45,6 +46,7 @@ export interface QabotRepositories {
   knowledgeSources?: MysqlKnowledgeSourceRepository
   staff?: StaffRepository
   mysqlPool?: Pool
+  operations?: MysqlOperationsRepository
   dispose(): Promise<void>
 }
 
@@ -94,6 +96,7 @@ export async function createQabotRepositories(
       knowledge: new MysqlKnowledgeProjection(pool),
       knowledgeSearch: new MysqlKnowledgeSearch(pool),
       knowledgeSources: new MysqlKnowledgeSourceRepository(pool),
+      operations: new MysqlOperationsRepository(pool),
       staff,
       mysqlPool: pool,
       dispose: async () => { await pool.end() },

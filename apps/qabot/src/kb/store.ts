@@ -42,6 +42,8 @@ export interface KbMediaRef {
   id: number
   title: string
   sourceUrl: string | null
+  /** Selects the authenticated employee-facing binary endpoint. */
+  assetKind?: 'knowledge' | 'faq'
 }
 
 interface DocRow {
@@ -518,7 +520,7 @@ export class KbStore {
       score: anyCosine(queryVector, JSON.parse(row.vector) as EmbedVector),
       corroborates: /图片说明：\S/.test(row.content),
     })), limit)
-    return mergeMentionedVisionMatches(vectorMatches, rows.map(row => ({
+    return mergeMentionedVisionMatches(vectorMatches, contextRows.map(row => ({
       item: itemOf(row),
       title: row.title,
       description: row.content,

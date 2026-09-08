@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-09-08-qabot-handoff-recommendation-consistency.md
+2026-09-08-qabot-handoff-recommendation-consistency.md: 45490e60c7111ca97355321a14fd01e1fe338db2
+2026-09-08-qabot-handoff-recommendation-consistency.zh.md: b97ae9a3b0a24439a3855675dcf5f74810c969fa

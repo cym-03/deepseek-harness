@@ -4,11 +4,11 @@ import { describe, expect, it } from 'vitest'
 
 interface EvaluationCase {
   id: string
-  category: string
+  domain: string
+  scenario: 'normal_answer' | 'manual_required' | 'knowledge_missing' | 'safe_refusal' | 'out_of_scope'
   question: string
   expectedTerms: string[]
-  shouldHandoff: boolean
-  expectsImage: boolean
+  expectedImageTopics: string[]
 }
 
 const evaluationPath = fileURLToPath(new URL('../evals/employee-service-desk.json', import.meta.url))
@@ -20,20 +20,33 @@ function loadEvaluationCases(): EvaluationCase[] {
 describe('employee service desk evaluation baseline', () => {
   it('covers every launch-critical question category with stable ids', () => {
     const cases = loadEvaluationCases()
-    const categories = new Set(cases.map(item => item.category))
-    expect(categories).toEqual(new Set([
-      'HR', '财务', 'IT', '行政', '考勤', '无答案', '敏感问题', '图片内容', '过期制度', '部门权限',
+    const domains = new Set(cases.map(item => item.domain))
+    expect(domains).toEqual(new Set([
+      '人事', '财务', 'IT', '行政', '考勤', '视觉内容', '知识缺失', '业务范围外', '安全拒答',
     ]))
     expect(new Set(cases.map(item => item.id)).size).toBe(cases.length)
   })
 
-  it('requires explicit expected disposition and visual behavior', () => {
+  it('separates answer, handoff, refusal, missing-knowledge, and out-of-scope scenarios', () => {
+    const scenarios = new Set(loadEvaluationCases().map(item => item.scenario))
+    expect(scenarios).toEqual(new Set([
+      'normal_answer', 'manual_required', 'knowledge_missing', 'safe_refusal', 'out_of_scope',
+    ]))
+  })
+
+  it('covers each business domain with multiple questions', () => {
+    const cases = loadEvaluationCases()
+    for (const domain of ['人事', '财务', 'IT', '行政', '考勤', '视觉内容']) {
+      expect(cases.filter(item => item.domain === domain).length).toBeGreaterThanOrEqual(3)
+    }
+  })
+
+  it('requires explicit expected text and visual topics', () => {
     for (const item of loadEvaluationCases()) {
       expect(item.id).toMatch(/^[a-z0-9-]+$/)
       expect(item.question.trim().length).toBeGreaterThan(0)
-      expect(typeof item.shouldHandoff).toBe('boolean')
-      expect(typeof item.expectsImage).toBe('boolean')
       expect(Array.isArray(item.expectedTerms)).toBe(true)
+      expect(Array.isArray(item.expectedImageTopics)).toBe(true)
     }
   })
 })

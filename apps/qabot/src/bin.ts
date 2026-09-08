@@ -338,6 +338,7 @@ async function cmdServe(): Promise<void> {
     audit,
     outbox,
     ...repositories.messages === undefined ? {} : { messages: repositories.messages },
+    ...repositories.operations === undefined ? {} : { operations: repositories.operations },
     ...projectKnowledge !== undefined ? { projectKnowledge } : {},
     ...knowledgeSources === undefined ? {} : { knowledgeSources },
     ...syncKnowledgeSource === undefined ? {} : { syncKnowledgeSource },

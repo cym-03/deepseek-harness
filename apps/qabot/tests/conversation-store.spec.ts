@@ -22,4 +22,19 @@ describe('ConversationStore activity ordering', () => {
       store.dispose()
     }
   })
+
+  it('does not reuse a titled conversation when a stale message count is zero', () => {
+    const store = new ConversationStore(':memory:')
+    try {
+      store.create('employee', 'answered')
+      store.touch('employee', 'answered', 0, '在职证明在哪里申请？')
+
+      expect(store.findEmpty('employee')).toBeUndefined()
+
+      store.create('employee', 'empty')
+      expect(store.findEmpty('employee')?.sessionId).toBe('empty')
+    } finally {
+      store.dispose()
+    }
+  })
 })

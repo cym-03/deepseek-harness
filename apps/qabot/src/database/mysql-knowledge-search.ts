@@ -17,6 +17,8 @@ import type { KbMediaRef } from '../kb/store.ts'
 
 interface KnowledgeHitRow extends RowDataPacket {
   id: number
+  source_id: number
+  service_group: string
   title: string
   source: string
   url: string | null
@@ -132,6 +134,17 @@ export class MysqlKnowledgeSearch implements KnowledgeSearch, KnowledgeMediaSear
     return !result.startsWith('未在知识库中找到') && result !== '（空查询）'
   }
 
+  /** Returns the strongest keyword attribution used by role-scoped operations analytics. */
+  async attribution(query: string): Promise<{ group: string; sourceId: number; relevance: number } | undefined> {
+    const queryTerms = terms(query.trim())
+    const hits = (await this.activeChunks()).map(row => ({ row, score: keywordScore(row, queryTerms) }))
+      .filter(hit => hit.score > 0).sort((left, right) => right.score - left.score)
+    const best = hits[0]
+    if (best === undefined) return undefined
+    const maximum = Math.max(1, queryTerms.reduce((sum, term) => sum + term.length, 0))
+    return { group: best.row.service_group, sourceId: best.row.source_id, relevance: Math.min(1, best.score / maximum) }
+  }
+
   async findVisionMedia(query: string, limit = 3, supportingText = ''): Promise<KbMediaRef[]> {
     const normalized = query.trim()
     if (normalized === '' || !visionEmbeddingsConfigured()) return []
@@ -169,7 +182,9 @@ export class MysqlKnowledgeSearch implements KnowledgeSearch, KnowledgeMediaSear
         corroborates: /图片说明：\S/.test(row.description),
       }]
     }), limit)
-    return mergeMentionedVisionMatches(vectorMatches, rows.map(row => ({
+    return mergeMentionedVisionMatches(vectorMatches, rows.filter(row => (
+      visionTitleMatchesContext(row.title, row.description, normalized, supportingText)
+    )).map(row => ({
       item: itemOf(row),
       title: row.title,
       description: row.description,
@@ -247,7 +262,7 @@ export class MysqlKnowledgeSearch implements KnowledgeSearch, KnowledgeMediaSear
 
   private async activeChunks(): Promise<KnowledgeHitRow[]> {
     const [rows] = await this.pool.query<KnowledgeHitRow[]>(`
-      SELECT c.id, d.title, s.source_key AS source, v.source_url AS url, c.content, e.vector_json
+      SELECT c.id, s.id AS source_id, s.service_group, d.title, s.source_key AS source, v.source_url AS url, c.content, e.vector_json
       FROM knowledge_chunks c
       JOIN knowledge_document_versions v ON v.id = c.version_id
       JOIN knowledge_documents d ON d.id = v.document_id

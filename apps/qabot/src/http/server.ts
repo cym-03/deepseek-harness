@@ -36,7 +36,8 @@ import {
 import type { Ticket } from '../ticket/store.ts'
 import { EMPLOYEE_TICKET_MESSAGE_PREFIX, loadConversationTimeline } from '../conversation/timeline.ts'
 import { Qabot } from '../runner.ts'
-import { buildWeeklyReport } from '../report/weekly.ts'
+import { answerRecommendsHumanHandoff } from '../handoff-policy.ts'
+import { OPERATIONS_GROUPS, type CuratedFaqInput, type MysqlOperationsRepository, type OperationsGroup } from '../report/operations.ts'
 import { hasRole, verifyPortalIdentity, type PortalIdentity } from '../security/identity.ts'
 import { canAccessTicket, canManageKnowledgeSource, isServiceDeskUser } from '../security/authorization.ts'
 import type {
@@ -112,10 +113,12 @@ export interface QabotHttpOptions {
   audit: AuditRepository
   outbox: OutboxRepository
   messages?: ConversationMessageRepository
+  /** MySQL operations analytics and curated-answer repository. */
+  operations?: MysqlOperationsRepository
 }
 
 export async function startHttpServer(options: QabotHttpOptions): Promise<ReturnType<typeof createServer>> {
-  const { qabot, tickets, kb, staff, audit, outbox, messages, knowledgeSources,
+  const { qabot, tickets, kb, staff, audit, outbox, messages, knowledgeSources, operations,
     syncKnowledgeSource, projectKnowledge } = options
   const knowledgeSearch = options.knowledgeSearch ?? kb
   const knowledgeMedia = options.knowledgeMedia
@@ -163,6 +166,26 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
       assignees: [],
     } satisfies LiveChange)
   }
+  const withFailureAudit = async <T>(input: {
+    identity: PortalIdentity
+    failureAction: string
+    resourceType: string
+    resourceId: string
+    work: () => Promise<T>
+  }): Promise<T> => {
+    try {
+      return await input.work()
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      try {
+        await audit.append({ actorId: input.identity.employeeId, action: input.failureAction,
+          resourceType: input.resourceType, resourceId: input.resourceId, detail: `失败原因：${message}` })
+      } catch (auditError) {
+        console.error('[audit] 失败操作未能写入审计:', auditError)
+      }
+      throw error
+    }
+  }
   const canReceiveChange = (identity: PortalIdentity, change: LiveChange): boolean => {
     if (change.employeeId === null) return true
     if (hasRole(identity, ['SystemAdmin'])) return true
@@ -173,13 +196,13 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     return identity.employeeId === change.employeeId
   }
 
-  const readJson = async (req: IncomingMessage): Promise<unknown> => {
+  const readJson = async (req: IncomingMessage, limit = maxBodyBytes): Promise<unknown> => {
     const chunks: Buffer[] = []
     let size = 0
     for await (const chunk of req) {
       const buffer = chunk as Buffer
       size += buffer.byteLength
-      if (size > maxBodyBytes) throw new Error('REQUEST_BODY_TOO_LARGE')
+      if (size > limit) throw new Error('REQUEST_BODY_TOO_LARGE')
       chunks.push(buffer)
     }
     const text = Buffer.concat(chunks).toString('utf8')
@@ -237,6 +260,24 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     return identity
   }
 
+  const identityGroup = (identity: PortalIdentity): OperationsGroup | undefined => {
+    const group = identity.departmentIds.map(item => item === 'default' ? '其他' : item)
+      .find(item => OPERATIONS_GROUPS.includes(item as OperationsGroup))
+    return group as OperationsGroup | undefined
+  }
+
+  const scopedGroup = (identity: PortalIdentity, requested?: string | null): OperationsGroup | undefined => {
+    if (!hasRole(identity, ['SystemAdmin'])) return identityGroup(identity)
+    if (requested === undefined || requested === null || requested === '' || requested === '全部') return undefined
+    if (!OPERATIONS_GROUPS.includes(requested as OperationsGroup)) throw new Error('OPERATIONS_GROUP_INVALID')
+    return requested as OperationsGroup
+  }
+
+  const requireOperations = (): MysqlOperationsRepository => {
+    if (operations === undefined) throw new Error('OPERATIONS_UNAVAILABLE')
+    return operations
+  }
+
   const requireKnowledgeSourceAccess = async (ctx: HttpContext): Promise<{
     identity: PortalIdentity
     source: KnowledgeSourceRecord
@@ -287,6 +328,29 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
   }
 
   const answerConversation = async (userId: string, message: string, sessionId?: string): Promise<Record<string, unknown>> => {
+    const directFaq = operations === undefined ? undefined : await operations.matchFaq(message)
+    if (directFaq !== undefined && sessionId !== undefined) {
+      const operationsRepository = requireOperations()
+      const ticket = await tickets.ensureOpen({ sessionId, userKey: userId, question: message })
+      const now = Date.now()
+      const images = (directFaq.images as Array<{ id: number; fileName: string }>).map(item => ({
+        id: item.id, title: item.fileName, sourceUrl: null, assetKind: 'faq' as const,
+      }))
+      const links = directFaq.links as Array<{ title: string; url: string }>
+      const answer = `${String(directFaq.answer)}${links.length === 0 ? '' : `\n\n${links.map(link => `📎 [${link.title}](${link.url})`).join('\n')}`}`
+      await qabot.employeeMessage(sessionId, message)
+      await qabot.humanReply(sessionId, `【常见问题标准答案】${answer}`)
+      await messages?.upsert([
+        { sessionId, sourceType: 'system', sourceId: `faq-user-${now}`, sourceOrder: now * 2, role: 'user', text: message, createdAt: now },
+        { sessionId, sourceType: 'system', sourceId: `faq-answer-${now}`, sourceOrder: now * 2 + 1, role: 'assistant', text: answer, createdAt: now + 1, images },
+      ])
+      await operationsRepository.recordFaqUse(Number(directFaq.id), sessionId, message)
+      await operationsRepository.recordTurn({
+        sessionId, ticketId: ticket.id, question: message, answer,
+        group: directFaq.group as OperationsGroup, knowledgeHit: true, faqId: Number(directFaq.id),
+      })
+      return { text: answer, ticketId: ticket.id, sessionId, handoffRequested: false, serviceMs: 0, images, directFaq: true }
+    }
     const currentTicket = sessionId === undefined ? undefined : await tickets.forSession(sessionId)
     if (sessionId !== undefined && currentTicket !== undefined
       && ['waiting_agent', 'in_service', 'waiting_employee', 'reopened'].includes(currentTicket.status)) {
@@ -299,6 +363,14 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
         }
       }
       const outcome = await qabot.ask(userId, message, sessionId)
+      const attribution = 'attribution' in knowledgeSearch
+        ? await (knowledgeSearch as KnowledgeSearch & {
+          attribution(query: string): Promise<{ group: string; sourceId: number; relevance: number } | undefined>
+        }).attribution(message)
+        : undefined
+      await operations?.recordTurn({ sessionId, ticketId: currentTicket.id, question: message, answer: outcome.text,
+        group: (attribution?.group ?? currentTicket.department ?? '其他') as OperationsGroup, knowledgeHit: true,
+        ...(attribution === undefined ? {} : { sourceId: attribution.sourceId, relevance: attribution.relevance }) })
       return {
         text: outcome.text, ticketId: currentTicket.id, sessionId, handoffRequested: false,
         humanServiceActive: true, knowledgeAnswered: true, serviceMs: outcome.serviceMs,
@@ -307,6 +379,18 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     }
     const outcome = await qabot.ask(userId, message, sessionId)
     const answeredSessionId = qabot.sessionIdOf(userId)
+    if (answeredSessionId !== undefined) {
+      const attribution = 'attribution' in knowledgeSearch
+        ? await (knowledgeSearch as KnowledgeSearch & {
+          attribution(query: string): Promise<{ group: string; sourceId: number; relevance: number } | undefined>
+        }).attribution(message)
+        : undefined
+      await operations?.recordTurn({ sessionId: answeredSessionId, ticketId: outcome.ticketId, question: message, answer: outcome.text,
+        group: (attribution?.group ?? '其他') as OperationsGroup, knowledgeHit: attribution !== undefined,
+        ...(attribution === undefined ? {} : { sourceId: attribution.sourceId, relevance: attribution.relevance }) })
+      if (outcome.handoffRequested) await operations?.recordHandoff({ sessionId: answeredSessionId, ticketId: outcome.ticketId,
+        type: 'suggested', question: message, reason: attribution === undefined ? '知识不足' : '需要人工处理', group: (attribution?.group ?? '其他') as OperationsGroup })
+    }
     return {
       text: outcome.text,
       ticketId: outcome.ticketId,
@@ -326,9 +410,10 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
   }> => {
     const timeline = await loadConversationTimeline(sessionId, qabot, tickets, kb, messages)
     const ticket = await tickets.forSession(sessionId)
-    const handoffRecommended = ticket?.status === 'open' && timeline.events.some(
+    const handoffRecommended = ticket?.status === 'open' && (timeline.events.some(
       event => event.type === 'tool/call' && event.data.name === 'request_human_handoff',
-    )
+    ) || timeline.messages.some(message => message.role === 'assistant'
+      && answerRecommendsHumanHandoff(message.text)))
     return {
       sessionId,
       messages: timeline.messages.map(({ role, text, createdAt, images }) => ({
@@ -439,6 +524,8 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     if (ticket === undefined) throw new Error('TICKET_NOT_FOUND')
     const serviceGroup = group === '其他' ? 'default' : group
     await tickets.markHandoff(sessionId, ticket.handoffReason ?? '员工选择转人工', serviceGroup)
+    await operations?.recordHandoff({ sessionId, ticketId: ticket.id, type: 'selected', question: ticket.question,
+      reason: '员工选择转人工', group: group as OperationsGroup })
     const current = await tickets.forSession(sessionId)
     if (current !== undefined) {
       await outbox.enqueue(`ticket:${current.id}:handoff:${current.version}`, 'ticket.handoff', {
@@ -728,7 +815,8 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
       resourceId: String(created.source.id),
       detail: JSON.stringify({ title, group, url }),
     })
-    const result = await syncKnowledgeSource(created.source)
+    const result = await withFailureAudit({ identity, failureAction: 'knowledge.source.sync_failed',
+      resourceType: 'knowledge-source', resourceId: String(created.source.id), work: async () => await syncKnowledgeSource(created.source) })
     return { source: await knowledgeSources.get(created.source.id), result }
   })
 
@@ -760,7 +848,8 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
         source = await knowledgeSources.get(source.id) ?? source
       }
     }
-    const result = await syncKnowledgeSource(source)
+    const result = await withFailureAudit({ identity, failureAction: 'knowledge.source.sync_failed',
+      resourceType: 'knowledge-source', resourceId: String(source.id), work: async () => await syncKnowledgeSource(source) })
     await audit.append({ actorId: identity.employeeId, action: result.failed > 0 ? 'knowledge.source.sync_failed' : 'knowledge.source.sync',
       resourceType: 'knowledge-source', resourceId: String(source.id), detail: JSON.stringify(result) })
     return { source: await knowledgeSources.get(source.id), result }
@@ -782,27 +871,97 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
     return Promise.resolve(kb.visionStatus())
   })
 
-  route('GET', '/v1/analytics/weekly', async (ctx) => {
+  const analyticsRange = (ctx: HttpContext, identity: PortalIdentity) => {
+    const now = new Date()
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime()
+    const from = Number(ctx.url.searchParams.get('from') ?? monthStart)
+    const to = Number(ctx.url.searchParams.get('to') ?? Date.now())
+    if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to) throw new Error('OPERATIONS_RANGE_INVALID')
+    const group = scopedGroup(identity, ctx.url.searchParams.get('group'))
+    return { from, to, ...(group === undefined ? {} : { group }) }
+  }
+
+  route('GET', '/v1/analytics/overview', async (ctx) => {
     const identity = requireServiceDesk(ctx)
-    const weeks = Number(ctx.url.searchParams.get('weeks') ?? 1)
-    const sinceRaw = ctx.url.searchParams.get('since')
-    const since = sinceRaw === null ? undefined : Number(sinceRaw)
-    const requestedAssignee = ctx.url.searchParams.get('assignee') ?? undefined
-    const assignee = hasRole(identity, ['SystemAdmin']) ? requestedAssignee : identity.displayName
-    return buildWeeklyReport(
-      tickets,
-      Number.isFinite(since) ? since : undefined,
-      Number.isFinite(weeks) && weeks > 0 ? weeks : 1,
-      assignee,
-      messages,
-    )
+    return await requireOperations().overview(analyticsRange(ctx, identity))
+  })
+
+  route('POST', '/v1/analytics/voc', async (ctx) => {
+    const identity = requireServiceDesk(ctx)
+    const body = ctx.json as { from?: unknown; to?: unknown; group?: unknown }
+    const url = new URL(ctx.url)
+    if (typeof body.from === 'number') url.searchParams.set('from', String(body.from))
+    if (typeof body.to === 'number') url.searchParams.set('to', String(body.to))
+    if (typeof body.group === 'string') url.searchParams.set('group', body.group)
+    return await requireOperations().voc(analyticsRange({ ...ctx, url }, identity), identity)
+  })
+
+  route('GET', '/v1/faqs/recommendations', async (ctx) => {
+    requireEmployee(ctx)
+    return await requireOperations().recommendations()
+  })
+
+  route('GET', '/v1/operations/faqs', async (ctx) => {
+    const identity = requireServiceDesk(ctx)
+    return { faqs: await requireOperations().listFaqs(scopedGroup(identity, ctx.url.searchParams.get('group'))) }
+  })
+
+  const faqInput = (body: unknown, identity: PortalIdentity): CuratedFaqInput => {
+    const value = body as Partial<CuratedFaqInput>
+    const group = scopedGroup(identity, value.group)
+    if (group === undefined) throw new Error('FAQ_INVALID')
+    return { group, question: String(value.question ?? ''), answer: String(value.answer ?? ''), enabled: value.enabled !== false,
+      sortOrder: Number.isInteger(value.sortOrder) ? Number(value.sortOrder) : 0,
+      links: Array.isArray(value.links) ? value.links : [], images: Array.isArray(value.images) ? value.images : [] }
+  }
+
+  route('POST', '/v1/operations/faqs', async (ctx) => {
+    const identity = requireServiceDesk(ctx)
+    const input = faqInput(ctx.json, identity)
+    const faq = await withFailureAudit({ identity, failureAction: 'faq.create_failed', resourceType: '常见问题',
+      resourceId: input.question, work: async () => await requireOperations().createFaq(identity, input) })
+    await audit.append({ actorId: identity.employeeId, action: 'faq.create', resourceType: '常见问题', resourceId: input.question, detail: `所属分组：${input.group}` })
+    return { faq }
+  })
+
+  route('PATCH', '/v1/operations/faqs/<id>', async (ctx) => {
+    const identity = requireServiceDesk(ctx)
+    const input = faqInput(ctx.json, identity)
+    const faq = await withFailureAudit({ identity, failureAction: 'faq.update_failed', resourceType: '常见问题', resourceId: ctx.params.id ?? '',
+      work: async () => await requireOperations().updateFaq(identity, Number(ctx.params.id), input) })
+    await audit.append({ actorId: identity.employeeId, action: 'faq.update', resourceType: '常见问题', resourceId: ctx.params.id ?? '', detail: `问题：${input.question}` })
+    return { faq }
+  })
+
+  route('DELETE', '/v1/operations/faqs/<id>', async (ctx) => {
+    const identity = requireServiceDesk(ctx)
+    await withFailureAudit({ identity, failureAction: 'faq.remove_failed', resourceType: '常见问题', resourceId: ctx.params.id ?? '', work: async () => {
+      if (!await requireOperations().removeFaq(identity, Number(ctx.params.id))) throw new Error('FAQ_NOT_FOUND')
+    } })
+    await audit.append({ actorId: identity.employeeId, action: 'faq.remove', resourceType: '常见问题', resourceId: ctx.params.id ?? '', detail: null })
+    return { ok: true }
+  })
+
+  route('GET', '/v1/faqs/assets/<id>', async (ctx) => {
+    requireEmployee(ctx)
+    const asset = await requireOperations().faqAsset(Number(ctx.params.id))
+    if (asset === undefined) throw new Error('FAQ_ASSET_NOT_FOUND')
+    ctx.res.writeHead(200, { 'content-type': asset.mime, 'cache-control': 'private, max-age=3600' })
+    ctx.res.end(asset.body)
+    return undefined
   })
 
   route('GET', '/v1/system/audit', async (ctx) => {
     requireSystemAdmin(ctx)
-    const limitRaw = Number(ctx.url.searchParams.get('limit') ?? 100)
-    const limit = Number.isInteger(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 500) : 100
-    return { records: await audit.list(limit) }
+    const page = Math.max(1, Number(ctx.url.searchParams.get('page') ?? 1))
+    const pageSize = Math.min(10, Math.max(1, Number(ctx.url.searchParams.get('pageSize') ?? 10)))
+    const from = Number(ctx.url.searchParams.get('from'))
+    const to = Number(ctx.url.searchParams.get('to'))
+    return await requireOperations().auditPage(
+      page, pageSize,
+      Number.isFinite(from) && from > 0 ? from : undefined,
+      Number.isFinite(to) && to > 0 ? to : undefined,
+    )
   })
 
   route('POST', '/api/chat', async (ctx) => {
@@ -1096,21 +1255,6 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
 
   route('GET', '/api/stats', async () => tickets.stats())
 
-  // 周报（供门户「数据报告」模块调用）。?weeks=1 默认最近一周，?since=时间戳 指定起点。
-  route('GET', '/api/reports/weekly', async (ctx) => {
-    const weeks = Number(ctx.url.searchParams.get('weeks') ?? 1)
-    const sinceRaw = ctx.url.searchParams.get('since')
-    const since = sinceRaw !== null ? Number(sinceRaw) : undefined
-    const assignee = ctx.url.searchParams.get('assignee') ?? undefined
-    return buildWeeklyReport(
-      tickets,
-      Number.isFinite(since) ? since : undefined,
-      Number.isFinite(weeks) && weeks > 0 ? weeks : 1,
-      assignee,
-      messages,
-    )
-  })
-
   // 服务人员名单（qa-admin 后台配置用，按身份组）
   route('GET', '/api/staff', async (ctx) => {
     const group = ctx.url.searchParams.get('group')
@@ -1186,8 +1330,9 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
         send(res, 200, { status: 'ok' })
         return
       }
+      const faqBodyLimit = Number(process.env.QABOT_FAQ_MAX_BODY_BYTES ?? 35 * 1024 * 1024)
       const json = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method ?? '')
-        ? await readJson(req)
+        ? await readJson(req, url.pathname.startsWith('/v1/operations/faqs') ? faqBodyLimit : maxBodyBytes)
         : {}
       for (const { method, pattern, handler } of routes) {
         if (req.method !== method) continue
@@ -1257,6 +1402,27 @@ export async function startHttpServer(options: QabotHttpOptions): Promise<Return
         }
         if (msg === 'KNOWLEDGE_SOURCE_INVALID') {
           send(res, 400, { code: msg, message: '请填写标题、有效的飞书文档链接和知识分组' })
+          return
+        }
+        if (msg === 'OPERATIONS_UNAVAILABLE') {
+          send(res, 503, { code: msg, message: '运营分析需要启用 MySQL 数据库' })
+          return
+        }
+        if (msg === 'OPERATIONS_RANGE_INVALID' || msg === 'OPERATIONS_GROUP_INVALID' || msg === 'ACTION_INVALID' || msg === 'FAQ_INVALID'
+          || msg === 'FAQ_LINK_INVALID' || msg === 'FAQ_IMAGE_TYPE_INVALID' || msg === 'FAQ_ATTACHMENT_LIMIT') {
+          send(res, 400, { code: msg, message: '运营分析或常见问题参数无效' })
+          return
+        }
+        if (msg === 'FAQ_GROUP_LIMIT') {
+          send(res, 409, { code: msg, message: '每个分组最多启用 5 个常见问题' })
+          return
+        }
+        if (msg === 'FAQ_IMAGE_TOO_LARGE') {
+          send(res, 413, { code: msg, message: '单张图片不能超过 10MB' })
+          return
+        }
+        if (msg === 'FAQ_NOT_FOUND' || msg === 'FAQ_ASSET_NOT_FOUND') {
+          send(res, 404, { code: msg, message: '常见问题或图片不存在' })
           return
         }
         // 中转网关余额不足 / 流被掐断 → 给出明确提示而非生硬错误。

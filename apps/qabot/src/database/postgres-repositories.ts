@@ -53,7 +53,7 @@ export class PostgresConversationRepository implements ConversationRepository {
     const rows = await this.sql<ConversationRow[]>`
       SELECT user_key, session_id, title, created_at, last_message_at, message_count
       FROM conversations
-      WHERE user_key = ${userKey} AND message_count = 0 AND archived_at IS NULL
+      WHERE user_key = ${userKey} AND message_count = 0 AND title = '新对话' AND archived_at IS NULL
       ORDER BY last_message_at DESC LIMIT 1
     `
     return rows[0] === undefined ? undefined : toConversation(rows[0])

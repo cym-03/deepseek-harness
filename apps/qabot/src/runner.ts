@@ -13,6 +13,7 @@ import { join } from 'node:path'
 import type { Conversation } from './conversation/store.ts'
 import type { ConversationRepository, TicketRepository } from './domain/repositories.ts'
 import { KeyedSerialExecutor } from './application/keyed-serial.ts'
+import { answerRecommendsHumanHandoff } from './handoff-policy.ts'
 
 export interface TurnOutcome {
   /** 本轮回合的最终助手文本（最后一次 assistant/message）。 */
@@ -338,7 +339,7 @@ export class Qabot {
     // 转人工建议保留在 session 工具事件中；员工选择服务组后才更新工单状态。
     const handoffRequested = agent.session.events.slice(firstSeq).some(
       event => event.type === 'tool/call' && event.data.name === 'request_human_handoff',
-    )
+    ) || answerRecommendsHumanHandoff(text)
     // 服务时间：随会话累积，工单在整个会话期间保持 open，仅在结束会话时关闭。
     await this.tickets.closeService(sessionId)
 

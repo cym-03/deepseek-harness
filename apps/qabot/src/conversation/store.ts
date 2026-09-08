@@ -84,7 +84,7 @@ export class ConversationStore implements ConversationRepository {
   /** 某用户是否已有空会话（无消息）。 */
   findEmpty(userKey: string): Conversation | undefined {
     const row = this.db.prepare(
-      'SELECT * FROM conversations WHERE user_key = ? AND message_count = 0 AND archived_at IS NULL ORDER BY last_message_at DESC LIMIT 1',
+      "SELECT * FROM conversations WHERE user_key = ? AND message_count = 0 AND title = '新对话' AND archived_at IS NULL ORDER BY last_message_at DESC LIMIT 1",
     ).get(userKey) as ConvRow | undefined
     return row === undefined ? undefined : rowToConv(row)
   }

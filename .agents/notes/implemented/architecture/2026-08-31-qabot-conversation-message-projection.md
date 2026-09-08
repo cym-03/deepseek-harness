@@ -16,6 +16,8 @@ MySQL also stores one monotonic read position per role-scoped employee and conve
 
 The `project-messages` command backfills every known conversation without invoking a language, text-embedding, or visual-embedding model. Normal conversation reads keep the projection current. MySQL is the production implementation; SQLite and PostgreSQL continue to use the existing read-time timeline until they receive equivalent message repositories.
 
+Qabot reuses a conversation as the single pending blank only when both its projected message count is zero and its title remains `新对话`. A titled conversation is never reused as blank even if delayed projection or recovery temporarily leaves its metadata count at zero.
+
 ## Alternatives considered
 
 - **Keep local session files as the only employee transcript source:** rejected because business UI availability would remain coupled to process launch paths and local file discovery.
@@ -25,4 +27,4 @@ The `project-messages` command backfills every known conversation without invoki
 
 ## Consequences
 
-The employee and service-desk interfaces can recover complete chat history from MySQL even when a later DSH read is empty. Unread badges survive refreshes and browser changes, and opening one conversation clears only that reader's position. Existing model memory semantics remain unchanged. Projection and read-position writes add small database transactions to timeline reads, and deployments using MySQL apply migrations `008_conversation_messages.sql` and `009_conversation_message_reads.sql` before serving traffic. The backfill command is safe to rerun because its source key is unique.
+The employee and service-desk interfaces can recover complete chat history from MySQL even when a later DSH read is empty. Unread badges survive refreshes and browser changes, opening one conversation clears only that reader's position, and creating a new conversation cannot silently reopen a titled conversation with stale count metadata. Existing model memory semantics remain unchanged. Projection and read-position writes add small database transactions to timeline reads, and deployments using MySQL apply migrations `008_conversation_messages.sql` and `009_conversation_message_reads.sql` before serving traffic. The backfill command is safe to rerun because its source key is unique.
